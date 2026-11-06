@@ -1,0 +1,46 @@
+[
+  {
+    "id": "demo-edeka-2026-11-02",
+    "rawText": "EDEKA\nVielen Dank für Ihren Einkauf\nMilch 3,5% 1,09 A\nBio Vollkornbrot 2,49 A\nÄpfel Elstar 1,89 A\nPfand 0,25 B\nSUMME EUR 5,72\nEC-KARTE\n02.11.2026 10:42",
+    "storeName": "EDEKA",
+    "purchaseDateKey": "2026-11-02",
+    "purchaseTime": "10:42",
+    "totalCents": 572,
+    "paymentMethod": "card",
+    "lineItems": [
+      { "rawName": "Milch 3,5%", "name": "Milch", "quantity": 1, "amountCents": 109, "category": "Groceries", "necessity": "essential" },
+      { "rawName": "Bio Vollkornbrot", "name": "Vollkornbrot", "quantity": 1, "amountCents": 249, "category": "Groceries", "necessity": "essential" },
+      { "rawName": "Äpfel Elstar", "name": "Äpfel", "quantity": 1, "amountCents": 189, "category": "Groceries", "necessity": "essential" },
+      { "rawName": "Pfand", "name": "Pfand", "quantity": 1, "amountCents": 25, "category": "Deposit/Pfand", "necessity": "neutral", "isDeposit": true }
+    ]
+  },
+  {
+    "id": "demo-aldi-2026-10-14",
+    "rawText": "ALDI SÜD\nBananen 1,29 A\nButter 2,19 A\nSchokolade 1,49 A\nPfandrückgabe -0,25 B\nGESAMT 4,72 EUR\n14.10.26 18:07",
+    "storeName": "ALDI SÜD",
+    "purchaseDateKey": "2026-10-14",
+    "purchaseTime": "18:07",
+    "totalCents": 472,
+    "paymentMethod": "cash",
+    "lineItems": [
+      { "rawName": "Bananen", "name": "Bananen", "quantity": 1, "amountCents": 129, "category": "Groceries", "necessity": "essential" },
+      { "rawName": "Butter", "name": "Butter", "quantity": 1, "amountCents": 219, "category": "Groceries", "necessity": "essential" },
+      { "rawName": "Schokolade", "name": "Schokolade", "quantity": 1, "amountCents": 149, "category": "Snacks & Sweets", "necessity": "discretionary" },
+      { "rawName": "Pfandrückgabe", "name": "Pfandrückgabe", "quantity": 1, "amountCents": -25, "category": "Deposit/Pfand", "necessity": "neutral", "isDeposit": true }
+    ]
+  },
+  {
+    "id": "demo-billa-2026-09-20",
+    "rawText": "BILLA\nSemmel 0,39\nKäse Gouda 2,79\nKaffee to go 2,50\nSUMME 5,68 EUR\nBAR\n20.09.2026 08:15",
+    "storeName": "BILLA",
+    "purchaseDateKey": "2026-09-20",
+    "purchaseTime": "08:15",
+    "totalCents": 568,
+    "paymentMethod": "cash",
+    "lineItems": [
+      { "rawName": "Semmel", "name": "Semmel", "quantity": 1, "amountCents": 39, "category": "Groceries", "necessity": "essential" },
+      { "rawName": "Käse Gouda", "name": "Käse", "quantity": 1, "amountCents": 279, "category": "Groceries", "necessity": "essential" },
+      { "rawName": "Kaffee to go", "name": "Kaffee", "quantity": 1, "amountCents": 250, "category": "Cafe & Eating out", "necessity": "discretionary" }
+    ]
+  }
+]

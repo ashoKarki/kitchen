@@ -1,0 +1,10 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "./packages/shared"
+    }
+  ],
+  "compilerOptions": {},
+  "extends": "expo/tsconfig.base"
+}

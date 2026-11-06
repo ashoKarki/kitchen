@@ -1,0 +1,31 @@
+{
+  "name": "@my-kitchen/web",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "predev": "npm run build --workspace=@my-kitchen/shared",
+    "dev": "vite --host 0.0.0.0",
+    "prebuild": "npm run build --workspace=@my-kitchen/shared",
+    "build": "tsc -b && vite build",
+    "type-check": "tsc --build"
+  },
+  "dependencies": {
+    "@my-kitchen/shared": "1.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "firebase": "^11.1.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^7.1.1",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/react-dom": "^18.3.5",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5",
+    "vitest": "^2.1.8"
+  }
+}

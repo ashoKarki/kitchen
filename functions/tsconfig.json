@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noEmit": false,
+    "outDir": "lib",
+    "rootDir": "..",
+    "skipLibCheck": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true
+  },
+  "include": [
+    "src/**/*.ts",
+    "../packages/shared/src/budgetAnalytics.ts",
+    "../packages/shared/src/classify.ts",
+    "../packages/shared/src/periods.ts",
+    "../packages/shared/src/types.ts"
+  ]
+}

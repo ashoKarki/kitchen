@@ -1,0 +1,44 @@
+{
+  "name": "@my-kitchen/mobile",
+  "version": "1.0.0",
+  "private": true,
+  "main": "expo-router/entry",
+  "scripts": {
+    "prestart": "npm run build --workspace=@my-kitchen/shared",
+    "start": "expo start",
+    "pretype-check": "npm run build --workspace=@my-kitchen/shared",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@my-kitchen/shared": "1.0.0",
+    "@react-native-async-storage/async-storage": "2.2.0",
+    "expo": "^58.0.23",
+    "expo-auth-session": "~58.0.17",
+    "expo-dev-client": "~58.0.18",
+    "expo-device": "^58.0.0",
+    "expo-file-system": "~58.0.13",
+    "expo-image-manipulator": "~58.0.16",
+    "expo-image-picker": "~58.0.10",
+    "expo-localization": "^58.0.0",
+    "expo-notifications": "^58.1.8",
+    "expo-router": "^58.0.30",
+    "expo-sharing": "~58.0.22",
+    "expo-splash-screen": "~58.0.13",
+    "expo-web-browser": "~58.0.7",
+    "firebase": "^11.1.0",
+    "prop-types": "^15.8.1",
+    "react": "19.3.0",
+    "react-native": "0.88.1",
+    "react-native-gesture-handler": "~3.3.0",
+    "react-native-picker-select": "^9.3.1",
+    "react-native-safe-area-context": "^5.6.2",
+    "react-native-screens": "^4.23.0",
+    "react-native-svg": "^15.15.1",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/react": "~19.3.0",
+    "typescript": "~6.0.3",
+    "vitest": "^2.1.8"
+  }
+}

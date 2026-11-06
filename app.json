@@ -1,0 +1,12 @@
+{
+  "plugins": [
+    "expo-sharing",
+    "expo-web-browser"
+  ],
+  "android": {
+    "package": "com.ashok_karki.mykitchen"
+  },
+  "ios": {
+    "bundleIdentifier": "com.ashok-karki.mykitchen"
+  }
+}

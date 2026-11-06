@@ -1,0 +1,177 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /kitchen/main {
+      allow read: if isKitchenOwner();
+      allow create, update: if isKitchenOwner() && validSettings(request.resource.data);
+      allow delete: if false;
+
+      match /items/{itemId} {
+        allow read: if isKitchenOwner();
+        allow create, update: if isKitchenOwner() && validItem(request.resource.data);
+        allow delete: if isKitchenOwner();
+      }
+
+      match /devices/{deviceId} {
+        allow read: if isKitchenOwner();
+        allow create, update: if isKitchenOwner()
+          && request.resource.data.keys().hasOnly(['platform', 'updatedAt'])
+          && request.resource.data.keys().hasAll(['platform', 'updatedAt'])
+          && request.resource.data.platform in ['ios', 'android']
+          && request.resource.data.updatedAt is timestamp;
+        allow delete: if isKitchenOwner();
+      }
+
+      match /receipts/{receiptId} {
+        allow read: if isKitchenOwner();
+        allow create, update: if isKitchenOwner() && validReceipt(request.resource.data);
+        allow delete: if isKitchenOwner();
+      }
+
+      match /budgets/{budgetId} {
+        allow read: if isKitchenOwner();
+        allow create: if isKitchenOwner()
+          && validBudget(request.resource.data)
+          && !request.resource.data.keys().hasAny(['alertState']);
+        allow update: if isKitchenOwner()
+          && validBudget(request.resource.data)
+          && (
+            (!request.resource.data.keys().hasAny(['alertState'])
+              && !resource.data.keys().hasAny(['alertState']))
+            || (
+              request.resource.data.keys().hasAny(['alertState'])
+              && resource.data.keys().hasAny(['alertState'])
+              && request.resource.data.alertState == resource.data.alertState
+            )
+          );
+        allow delete: if isKitchenOwner();
+      }
+
+      match /alerts/{alertId} {
+        allow read: if isKitchenOwner();
+        allow create: if false;
+        allow update: if isKitchenOwner()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read'])
+          && request.resource.data.read is bool;
+        allow delete: if isKitchenOwner();
+      }
+
+      match /insights/{insightId} {
+        allow read: if isKitchenOwner();
+        allow write: if false;
+      }
+
+      match /usage/{usageId} {
+        allow read: if isKitchenOwner();
+        allow write: if false;
+      }
+
+      match /{document=**} {
+        allow read, write: if false;
+      }
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isKitchenOwner() {
+      return request.auth != null
+        && request.auth.token.email == 'karkiashok5@gmail.com'
+        && request.auth.token.email_verified == true;
+    }
+
+    function validSettings(data) {
+      return data.keys().hasOnly([
+          'reminderEnabled',
+          'reminderHour',
+          'timeZone',
+          'budgetAlertsEnabled',
+          'discretionaryCategories'
+        ])
+        && data.reminderEnabled is bool
+        && data.reminderHour is int
+        && data.reminderHour >= 0
+        && data.reminderHour <= 23
+        && data.timeZone is string
+        && data.budgetAlertsEnabled is bool
+        && data.discretionaryCategories is list;
+    }
+
+    function validItem(data) {
+      return data.name is string
+        && data.name.size() > 0
+        && data.name.size() <= 100
+        && data.quantity is int
+        && data.quantity >= 0
+        && data.quantity <= 9999
+        && data.category is string
+        && data.state in ['inStock', 'finished', 'toBuy']
+        && (!data.keys().hasAny(['bought']) || data.bought is bool)
+        && (!data.keys().hasAny(['boughtAt']) || data.boughtAt == null || data.boughtAt is timestamp)
+        && (!data.keys().hasAny(['receiptRecorded']) || data.receiptRecorded is bool);
+    }
+
+    function validReceipt(data) {
+      return data.storeName is string
+        && data.storeName.size() <= 100
+        && data.totalCents is int
+        && data.lineItems is list
+        && data.lineItems.size() <= 200
+        && data.purchaseDateKey is string
+        && data.purchaseDateKey.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && data.currency == 'EUR';
+    }
+
+    function validBudget(data) {
+      return data.keys().hasOnly([
+          'name',
+          'period',
+          'amountCents',
+          'scope',
+          'active',
+          'alertState',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.name is string
+        && data.name.size() > 0
+        && data.name.size() <= 100
+        && data.amountCents is int
+        && data.amountCents > 0
+        && data.period in ['weekly', 'monthly']
+        && data.scope is map
+        && validBudgetScope(data.scope)
+        && data.active is bool;
+    }
+
+    function validBudgetScope(scope) {
+      return scope.keys().hasOnly(['type', 'categories'])
+        && (
+          (scope.type == 'overall' && !scope.keys().hasAny(['categories']))
+          || (
+            scope.type == 'categories'
+            && scope.categories is list
+            && scope.categories.size() > 0
+            && scope.categories.size() <= 10
+            && scope.categories.hasOnly([
+              'Groceries',
+              'Beverages',
+              'Cafe & Eating out',
+              'Snacks & Sweets',
+              'Alcohol',
+              'Tobacco',
+              'Household',
+              'Drugstore & Personal care',
+              'Deposit/Pfand',
+              'Other'
+            ])
+          )
+          || (
+            scope.type == 'discretionary'
+            && !scope.keys().hasAny(['categories'])
+          )
+        );
+    }
+  }
+}
