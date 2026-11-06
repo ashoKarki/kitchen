@@ -6,6 +6,7 @@ dist/
 build/
 coverage/
 *.tsbuildinfo
+/functions/lib/
 
 # Expo
 .expo/
