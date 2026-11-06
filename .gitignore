@@ -23,6 +23,7 @@ web-build/
 .env.*
 !.env.example
 !.env.*.example
+/apps/mobile/GoogleService-Info.plist
 
 # Firebase local state and logs
 .firebase/
