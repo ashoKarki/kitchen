@@ -1,5 +1,5 @@
-import { useEffect } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { useEffect, useState } from "react";
+import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import Constants from "expo-constants";
 import * as WebBrowser from "expo-web-browser";
 import { useIdTokenAuthRequest } from "expo-auth-session/providers/google";
@@ -9,6 +9,9 @@ interface GoogleSignInScreenProps {
   authLoading: boolean;
   authBusy: boolean;
   error: string | null;
+  privateAccess: boolean;
+  onJoin: (code: string) => Promise<void>;
+  onSignOut: () => void;
   onIdToken: (idToken: string) => void;
   onError: (message: string) => void;
 }
@@ -19,6 +22,9 @@ export default function GoogleSignInScreen({
   authLoading,
   authBusy,
   error,
+  privateAccess,
+  onJoin,
+  onSignOut,
   onIdToken,
   onError
 }: GoogleSignInScreenProps) {
@@ -27,6 +33,9 @@ export default function GoogleSignInScreen({
       authLoading={authLoading}
       authBusy={authBusy}
       error={error}
+      privateAccess={privateAccess}
+      onJoin={onJoin}
+      onSignOut={onSignOut}
       setupMessage="Google sign-in redirects do not work in Expo Go. Install and open the My Kitchen development build, then start Expo with `npx expo start --dev-client`."
     />;
   }
@@ -47,6 +56,9 @@ export default function GoogleSignInScreen({
       authLoading={authLoading}
       authBusy={authBusy}
       error={error}
+      privateAccess={privateAccess}
+      onJoin={onJoin}
+      onSignOut={onSignOut}
       setupMessage={`Google sign-in is not configured for ${Platform.OS}. Add ${missingIds} to apps/mobile/.env, then restart Expo.`}
     />;
   }
@@ -55,6 +67,9 @@ export default function GoogleSignInScreen({
     authLoading={authLoading}
     authBusy={authBusy}
     error={error}
+    privateAccess={privateAccess}
+    onJoin={onJoin}
+    onSignOut={onSignOut}
     webClientId={webClientId}
     iosClientId={iosClientId}
     androidClientId={androidClientId}
@@ -67,6 +82,9 @@ function ConfiguredGoogleSignIn({
   authLoading,
   authBusy,
   error,
+  privateAccess,
+  onJoin,
+  onSignOut,
   webClientId,
   iosClientId,
   androidClientId,
@@ -101,6 +119,9 @@ function ConfiguredGoogleSignIn({
     authLoading={authLoading}
     authBusy={authBusy}
     error={error}
+    privateAccess={privateAccess}
+    onJoin={onJoin}
+    onSignOut={onSignOut}
     setupMessage={!request && !authLoading
       ? "Preparing Google sign-in. Please wait a moment."
       : null}
@@ -117,6 +138,9 @@ function SignInCard({
   authLoading,
   authBusy,
   error,
+  privateAccess,
+  onJoin,
+  onSignOut,
   setupMessage,
   requestReady = false,
   onSignIn
@@ -124,10 +148,14 @@ function SignInCard({
   authLoading: boolean;
   authBusy: boolean;
   error: string | null;
+  privateAccess?: boolean;
+  onJoin?: (code: string) => Promise<void>;
+  onSignOut?: () => void;
   setupMessage: string | null;
   requestReady?: boolean;
   onSignIn?: () => void;
 }) {
+  const [code, setCode] = useState("");
   return (
     <View style={styles.page}>
       <View style={styles.card}>
@@ -135,8 +163,9 @@ function SignInCard({
         <Text style={styles.eyebrow}>YOUR PRIVATE KITCHEN</Text>
         <Text style={styles.title}>Sign in to My Kitchen</Text>
         <Text style={styles.description}>
-          Use the authorized Google account to access your pantry and spending data.
+          Sign in with Google to access your pantry and spending data.
         </Text>
+        {privateAccess && <Text style={styles.error}>This app is private. Join with a single-use invitation code.</Text>}
         {error && <Text accessibilityRole="alert" style={styles.error}>{error}</Text>}
         {setupMessage && (
           <Text accessibilityRole="alert" style={styles.error}>
@@ -157,6 +186,30 @@ function SignInCard({
             {authLoading ? "Checking sign-in…" : authBusy ? "Signing in…" : "Continue with Google"}
           </Text>
         </Pressable>
+        {privateAccess && onJoin && (
+          <>
+            <TextInput
+              accessibilityLabel="Invitation code"
+              autoCapitalize="none"
+              autoCorrect={false}
+              onChangeText={setCode}
+              placeholder="Invitation code"
+              style={styles.input}
+              value={code}
+            />
+            <Pressable
+              accessibilityRole="button"
+              disabled={authBusy || !code.trim()}
+              onPress={() => void onJoin(code.trim())}
+              style={[styles.button, (authBusy || !code.trim()) && styles.buttonDisabled]}
+            >
+              <Text style={styles.buttonText}>Join kitchen</Text>
+            </Pressable>
+            <Pressable accessibilityRole="button" onPress={onSignOut} style={styles.signOut}>
+              <Text style={styles.signOutText}>Sign out</Text>
+            </Pressable>
+          </>
+        )}
       </View>
     </View>
   );
@@ -173,5 +226,8 @@ const styles = StyleSheet.create({
   button: { width: "100%", alignItems: "center", justifyContent: "center", minHeight: 48, borderRadius: 10, backgroundColor: "#31835d", marginTop: 22, paddingHorizontal: 16 },
   buttonDisabled: { opacity: 0.55 },
   buttonPressed: { backgroundColor: "#226b4a" },
-  buttonText: { color: "#fff", fontSize: 14, fontWeight: "700" }
+  buttonText: { color: "#fff", fontSize: 14, fontWeight: "700" },
+  input: { width: "100%", borderWidth: 1, borderColor: "#d1d5db", borderRadius: 10, paddingHorizontal: 14, paddingVertical: 12, marginTop: 16, color: "#1f2937" },
+  signOut: { marginTop: 12, padding: 10 },
+  signOutText: { color: "#286b4f", fontWeight: "600" }
 });

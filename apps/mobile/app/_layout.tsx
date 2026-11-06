@@ -9,9 +9,10 @@ import {
   signOut,
   type User
 } from "firebase/auth";
+import { httpsCallable } from "firebase/functions";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
-import { ensureSettings, KITCHEN_OWNER_EMAIL } from "@my-kitchen/shared";
-import { getDatabase, getFirebaseAuth } from "../src/firebase";
+import { ensureSettings } from "@my-kitchen/shared";
+import { getCloudFunctions, getDatabase, getFirebaseAuth } from "../src/firebase";
 import { PushStatusContext } from "../src/pushStatus";
 import { ToastProvider } from "../src/toast";
 import { registerForPushNotifications } from "../src/push";
@@ -33,12 +34,14 @@ export default function RootLayout() {
   const [authLoading, setAuthLoading] = useState(true);
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [membershipStatus, setMembershipStatus] = useState<"checking" | "member" | "private" | "signedOut">("checking");
   const router = useRouter();
 
   useEffect(() => {
     try {
       return onAuthStateChanged(getFirebaseAuth(), (user) => {
         setAuthUser(user);
+        setMembershipStatus(user ? "checking" : "signedOut");
         setAuthLoading(false);
       }, (error) => {
         setAuthError(error.message);
@@ -51,21 +54,41 @@ export default function RootLayout() {
     }
   }, []);
 
+  useEffect(() => {
+    if (!authUser) return;
+    let active = true;
+    setMembershipStatus("checking");
+    try {
+      const bootstrap = httpsCallable<void, { status: "owner" | "member" | "private" }>(
+        getCloudFunctions(),
+        "bootstrapKitchen"
+      );
+      void bootstrap().then(({ data }) => {
+        if (active) {
+          setMembershipStatus(data.status === "owner" || data.status === "member" ? "member" : "private");
+          setAuthError(data.status === "private" ? "This app is private. Join with an invitation code." : null);
+        }
+      }).catch((error: unknown) => {
+        if (active) {
+          setMembershipStatus("private");
+          setAuthError(error instanceof Error ? error.message : String(error));
+        }
+      });
+    } catch (error) {
+      setMembershipStatus("private");
+      setAuthError(error instanceof Error ? error.message : String(error));
+    }
+    return () => { active = false; };
+  }, [authUser]);
+
   const signInWithGoogleIdToken = useCallback(async (idToken: string) => {
     setAuthBusy(true);
     setAuthError(null);
     try {
-      const credential = await signInWithCredential(
+      await signInWithCredential(
         getFirebaseAuth(),
         GoogleAuthProvider.credential(idToken)
       );
-      if (
-        credential.user.email?.toLocaleLowerCase() !== KITCHEN_OWNER_EMAIL
-        || !credential.user.emailVerified
-      ) {
-        await signOut(getFirebaseAuth());
-        throw new Error(`Use the authorized Google account (${KITCHEN_OWNER_EMAIL}).`);
-      }
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -73,12 +96,31 @@ export default function RootLayout() {
     }
   }, []);
 
+  const joinKitchen = useCallback(async (code: string) => {
+    setAuthBusy(true);
+    setAuthError(null);
+    try {
+      const join = httpsCallable<{ code: string }, { status: "member" }>(getCloudFunctions(), "joinHousehold");
+      await join({ code });
+      setMembershipStatus("member");
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setAuthBusy(false);
+    }
+  }, []);
+
+  const signOutUser = useCallback(async () => {
+    try {
+      await signOut(getFirebaseAuth());
+      setAuthError(null);
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : String(error));
+    }
+  }, []);
+
   useEffect(() => {
-    if (
-      !authUser
-      || authUser.email?.toLocaleLowerCase() !== KITCHEN_OWNER_EMAIL
-      || !authUser.emailVerified
-    ) return;
+    if (!authUser || membershipStatus !== "member") return;
     let active = true;
     const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
     void (async () => {
@@ -110,20 +152,22 @@ export default function RootLayout() {
       active = false;
       subscription.remove();
     };
-  }, [authUser, router]);
+  }, [authUser, membershipStatus, router]);
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <PushStatusContext.Provider value={pushStatus}>
         <ToastProvider>
-          {!authLoading
-            && authUser?.email?.toLocaleLowerCase() === KITCHEN_OWNER_EMAIL
-            && authUser.emailVerified
+          {!authLoading && !(authUser && membershipStatus === "checking")
+            && authUser && membershipStatus === "member"
             ? <Stack screenOptions={{ headerShown: false }} />
             : <GoogleSignInScreen
               authLoading={authLoading}
               authBusy={authBusy}
-              error={authError ?? (authUser ? `Use the authorized Google account (${KITCHEN_OWNER_EMAIL}).` : null)}
+              error={authError}
+              privateAccess={Boolean(authUser)}
+              onJoin={joinKitchen}
+              onSignOut={() => void signOutUser()}
               onIdToken={signInWithGoogleIdToken}
               onError={setAuthError}
             />}

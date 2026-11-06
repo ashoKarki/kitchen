@@ -6,10 +6,10 @@ import {
   Timestamp,
   type Firestore
 } from "firebase/firestore";
-import { ensureSettings, KITCHEN_DOC_PATH, expenseCategories } from "@my-kitchen/shared";
+import { ensureSettings, KITCHEN_DOC_PATH, memberSettingsDocument, expenseCategories } from "@my-kitchen/shared";
 import type { KitchenItem, KitchenSettings, Receipt } from "@my-kitchen/shared";
 import { z } from "zod";
-import { getDatabase } from "./firebase";
+import { getDatabase, getFirebaseAuth } from "./firebase";
 
 const itemSchema = z.object({
   name: z.string().min(1).max(100),
@@ -30,6 +30,20 @@ const settingsSchema = z.object({
   budgetAlertsEnabled: z.boolean(),
   discretionaryCategories: z.array(z.enum(expenseCategories))
 });
+const memberSettingsSchema = z.object({
+  reminderEnabled: z.boolean().optional(),
+  reminderHour: z.number().int().min(0).max(23).optional(),
+  budgetAlertsEnabled: z.boolean().optional()
+});
+
+function readMemberSettings(value: unknown): Partial<Pick<KitchenSettings, "reminderEnabled" | "reminderHour" | "budgetAlertsEnabled">> {
+  const parsed = memberSettingsSchema.parse(value);
+  return {
+    ...(parsed.reminderEnabled === undefined ? {} : { reminderEnabled: parsed.reminderEnabled }),
+    ...(parsed.reminderHour === undefined ? {} : { reminderHour: parsed.reminderHour }),
+    ...(parsed.budgetAlertsEnabled === undefined ? {} : { budgetAlertsEnabled: parsed.budgetAlertsEnabled })
+  };
+}
 
 const lineItemSchema = z.object({
   rawName: z.string(),
@@ -121,24 +135,34 @@ export function useSettings(): LiveData<KitchenSettings> {
     error: null
   });
 
+  const memberUid = getFirebaseAuth().currentUser?.uid;
+
   useEffect(() => {
-    let unsubscribe: (() => void) | undefined;
+    const unsubscribers: Array<() => void> = [];
     let cancelled = false;
+    let kitchenSettings: KitchenSettings | null = null;
+    let memberSettings: Partial<Pick<KitchenSettings, "reminderEnabled" | "reminderHour" | "budgetAlertsEnabled">> = {};
+    const publish = () => {
+      if (kitchenSettings) {
+        setState({
+          data: { ...kitchenSettings, ...memberSettings },
+          loading: false,
+          error: null
+        });
+      }
+    };
     async function subscribe() {
       try {
         const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
         const db = database();
         await ensureSettings(db, timeZone);
         if (cancelled) return;
-        unsubscribe = onSnapshot(
+        unsubscribers.push(onSnapshot(
           doc(db, KITCHEN_DOC_PATH),
           (snapshot) => {
             try {
-              setState({
-                data: settingsSchema.parse(snapshot.data()),
-                loading: false,
-                error: null
-              });
+              kitchenSettings = settingsSchema.parse(snapshot.data());
+              publish();
             } catch (error) {
               setState({
                 data: null,
@@ -149,7 +173,25 @@ export function useSettings(): LiveData<KitchenSettings> {
 
           },
           (error) => setState({ data: null, loading: false, error: error.message })
-        );
+        ));
+        if (memberUid) {
+          unsubscribers.push(onSnapshot(
+            memberSettingsDocument(db, memberUid),
+            (snapshot) => {
+              try {
+                memberSettings = snapshot.exists() ? readMemberSettings(snapshot.data()) : {};
+                publish();
+              } catch (error) {
+                setState({
+                  data: null,
+                  loading: false,
+                  error: `Invalid member settings: ${error instanceof Error ? error.message : String(error)}`
+                });
+              }
+            },
+            (error) => setState({ data: null, loading: false, error: error.message })
+          ));
+        }
       } catch (error) {
         if (cancelled) return;
         setState({
@@ -162,9 +204,9 @@ export function useSettings(): LiveData<KitchenSettings> {
     void subscribe();
     return () => {
       cancelled = true;
-      unsubscribe?.();
+      for (const unsubscribe of unsubscribers) unsubscribe();
     };
-  }, []);
+  }, [memberUid]);
   return state;
 }
 

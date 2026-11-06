@@ -4,16 +4,15 @@ import { defineSecret, defineString } from "firebase-functions/params";
 import { HttpsError, onCall } from "firebase-functions/v2/https";
 import { z } from "zod";
 import { expenseCategories } from "../../packages/shared/src/types.js";
-import { requireKitchenOwner } from "./auth.js";
+import { requireMember } from "./auth.js";
+import { enforceAppCheck } from "./household.js";
 import { parseInsightResponse } from "./insightSchema.js";
 
-const appKeySecret = defineSecret("APP_KEY");
 const anthropicApiKey = defineSecret("ANTHROPIC_API_KEY");
 const anthropicModel = defineString("ANTHROPIC_MODEL", { default: "claude-sonnet-5-5" });
 const DAILY_INSIGHT_LIMIT = 10;
 
 const inputSchema = z.object({
-  appKey: z.string().min(1).max(256),
   context: z.object({
     currentPeriod: z.object({
       label: z.string().min(1).max(40),
@@ -73,19 +72,17 @@ async function consumeDailyInsight(): Promise<void> {
 export const generateInsights = onCall(
   {
     invoker: "public",
-    secrets: [appKeySecret, anthropicApiKey],
+    enforceAppCheck: enforceAppCheck.value(),
+    secrets: [anthropicApiKey],
     timeoutSeconds: 60,
     maxInstances: 2,
     memory: "512MiB"
   },
   async (request) => {
-    requireKitchenOwner(request);
+    await requireMember(request);
     const parsedInput = inputSchema.safeParse(request.data);
     if (!parsedInput.success) {
       throw new HttpsError("invalid-argument", `Invalid insight data: ${parsedInput.error.message}`);
-    }
-    if (parsedInput.data.appKey !== appKeySecret.value()) {
-      throw new HttpsError("permission-denied", "The app key is invalid.");
     }
     const apiKey = anthropicApiKey.value();
     if (!apiKey) throw new HttpsError("failed-precondition", "AI insights are not configured.");

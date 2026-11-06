@@ -8,6 +8,7 @@ import {
   signOut,
   type User
 } from "firebase/auth";
+import { httpsCallable } from "firebase/functions";
 import {
   createItem,
   completeShoppingList,
@@ -16,7 +17,6 @@ import {
   itemsForPurchaseCompletion,
   itemsForView,
   ensureSettings,
-  KITCHEN_OWNER_EMAIL,
   setItemBought,
   updateItem,
   updateSettings,
@@ -25,7 +25,7 @@ import {
   type KitchenItem,
   type NewKitchenItem
 } from "@my-kitchen/shared";
-import { getDatabase, getFirebaseAuth } from "./firebase";
+import { getCloudFunctions, getDatabase, getFirebaseAuth } from "./firebase";
 import { useItems, useSettings } from "./hooks";
 import BudgetsPage from "./BudgetsPage";
 import InsightsPage from "./InsightsPage";
@@ -55,19 +55,36 @@ function authErrorMessage(error: unknown): string {
 function SignInGate({
   error,
   loading,
-  onSignIn
+  onSignIn,
+  privateAccess,
+  onJoin,
+  onSignOut
 }: {
   error: string | null;
   loading: boolean;
   onSignIn: () => void;
+  privateAccess: boolean;
+  onJoin: (code: string) => Promise<void>;
+  onSignOut: () => void;
 }) {
+  const [code, setCode] = useState("");
   return <main className="auth-page">
     <section className="auth-card">
       <span className="brand-mark">m</span>
       <p className="eyebrow">YOUR PRIVATE KITCHEN</p>
       <h1>Sign in to My Kitchen</h1>
-      <p className="muted">Use the authorized Google account to access your pantry and spending data.</p>
+      <p className="muted">Sign in with Google to access your pantry and spending data.</p>
+      {privateAccess && <p className="error" role="status">This app is private. Join with a single-use invitation code.</p>}
       {error && <p className="error" role="alert">{error}</p>}
+      {privateAccess && <form onSubmit={(event) => {
+        event.preventDefault();
+        void onJoin(code.trim());
+      }}>
+        <label htmlFor="invite-code">Invitation code</label>
+        <input id="invite-code" autoComplete="one-time-code" value={code} onChange={(event) => setCode(event.target.value)} />
+        <button className="button primary" disabled={loading || !code.trim()}>Join kitchen</button>
+      </form>}
+      {privateAccess && <button className="button secondary" onClick={onSignOut}>Sign out</button>}
       <button className="button primary" disabled={loading} onClick={onSignIn}>
         {loading ? "Signing in…" : "Continue with Google"}
       </button>
@@ -477,7 +494,7 @@ function SettingsPage() {
     setSaved(false);
     setError(null);
     try {
-      await updateSettings(getDatabase(), changes);
+      await updateSettings(getDatabase(), changes, getFirebaseAuth().currentUser?.uid);
       setSaved(true);
       showToast("Settings saved.");
     } catch (caught) {
@@ -513,7 +530,7 @@ function SettingsPage() {
     </div>
     <div className="settings-card">
       <h2>Budget alerts</h2>
-      <p className="muted">Receive an in-app and push alert when an active budget reaches 80% or 100%.</p>
+      <p className="muted">Receive an in-app and push alert as an active budget reaches its warning thresholds and goes over budget.</p>
       <label className="toggle-row"><span>Enable budget alerts</span>
         <input type="checkbox" checked={current.budgetAlertsEnabled} onChange={(event) => void save({ budgetAlertsEnabled: event.target.checked })} />
       </label>
@@ -531,7 +548,117 @@ function SettingsPage() {
         }} />
       </label>)}
     </div>
+    <HouseholdSettings />
     <div className="settings-card app-info"><h2>My Kitchen</h2><p className="muted">Personal kitchen and spending tracker · English interface · EUR</p></div>
+  </section>;
+}
+
+interface HouseholdMemberInfo {
+  uid: string;
+  role: "owner" | "member";
+  displayName: string;
+}
+
+function HouseholdSettings() {
+  const { showToast } = useToast();
+  const [members, setMembers] = useState<HouseholdMemberInfo[] | null>(null);
+  const [email, setEmail] = useState("");
+  const [inviteCode, setInviteCode] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function loadMembers() {
+    try {
+      const list = httpsCallable<void, { members: HouseholdMemberInfo[] }>(
+        getCloudFunctions(),
+        "listHouseholdMembers"
+      );
+      const response = await list();
+      setMembers(response.data.members);
+    } catch (caught) {
+      const code = caught instanceof FirebaseError ? caught.code : "";
+      if (code === "functions/permission-denied") {
+        setMembers([]);
+        setError(null);
+      } else {
+        setError(caught instanceof Error ? caught.message : String(caught));
+      }
+    }
+  }
+
+  useEffect(() => {
+    void loadMembers();
+  }, []);
+
+  async function createHouseholdInvite(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    setInviteCode(null);
+    try {
+      const create = httpsCallable<{ email?: string }, { code: string }>(
+        getCloudFunctions(),
+        "createInvite"
+      );
+      const response = await create(email.trim() ? { email: email.trim() } : {});
+      setInviteCode(response.data.code);
+      setEmail("");
+      showToast("Invitation code created; it expires in 48 hours.");
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : String(caught);
+      setError(message);
+      showToast(message, "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function manageMember(uid: string, operation: "removeHouseholdMember" | "transferOwnership") {
+    setBusy(true);
+    setError(null);
+    try {
+      const invoke = httpsCallable<{ uid: string }, { status: string }>(getCloudFunctions(), operation);
+      await invoke({ uid });
+      await loadMembers();
+      showToast(operation === "removeHouseholdMember" ? "Member removed." : "Ownership transferred.");
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : String(caught);
+      setError(message);
+      showToast(message, "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (members === null && !error) return <div className="settings-card"><p className="muted">Loading household members…</p></div>;
+  if (members?.length === 0 && !error) return null;
+
+  return <section className="settings-card">
+    <h2>Household</h2>
+    <p className="muted">Invite a partner with a single-use code that expires after 48 hours.</p>
+    {error && <p className="error" role="alert">{error}</p>}
+    <form className="item-form" onSubmit={(event) => void createHouseholdInvite(event)}>
+      <label>Email lock (optional)
+        <input type="email" value={email} onChange={(event) => setEmail(event.target.value)} />
+      </label>
+      <button className="button primary" disabled={busy}>Create invitation</button>
+    </form>
+    {inviteCode && <p className="success" role="status">Share this code with your partner; it is shown once: <strong>{inviteCode}</strong></p>}
+    {members?.filter((member) => member.role !== "owner").map((member) => <div className="settings-row" key={member.uid}>
+      <span>{member.displayName || "Kitchen member"}</span>
+      <div className="actions">
+        <button className="button secondary" disabled={busy} onClick={() => {
+          if (window.confirm(`Transfer kitchen ownership to ${member.displayName || "this member"}?`)) {
+            void manageMember(member.uid, "transferOwnership");
+          }
+        }}>Transfer ownership</button>
+        <button className="button secondary" disabled={busy} onClick={() => {
+          if (window.confirm(`Remove ${member.displayName || "this member"} from the household?`)) {
+            void manageMember(member.uid, "removeHouseholdMember");
+          }
+        }}>Remove</button>
+      </div>
+    </div>)}
   </section>;
 }
 
@@ -543,11 +670,13 @@ function App() {
   const [authLoading, setAuthLoading] = useState(true);
   const [authError, setAuthError] = useState<string | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
+  const [membershipStatus, setMembershipStatus] = useState<"checking" | "member" | "private" | "signedOut">("checking");
 
   useEffect(() => {
     try {
       return onAuthStateChanged(getFirebaseAuth(), (user) => {
         setAuthUser(user);
+        setMembershipStatus(user ? "checking" : "signedOut");
         setAuthLoading(false);
         setAuthError(null);
       }, (error) => {
@@ -562,11 +691,37 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (
-      !authUser
-      || authUser.email?.toLocaleLowerCase() !== KITCHEN_OWNER_EMAIL
-      || !authUser.emailVerified
-    ) {
+    if (!authUser) {
+      setSetupError(null);
+      return;
+    }
+    let active = true;
+    setMembershipStatus("checking");
+    try {
+      const bootstrap = httpsCallable<void, { status: "owner" | "member" | "private" }>(
+        getCloudFunctions(),
+        "bootstrapKitchen"
+      );
+      void bootstrap().then(({ data }) => {
+        if (active) {
+          setMembershipStatus(data.status === "owner" || data.status === "member" ? "member" : "private");
+          setAuthError(data.status === "private" ? "This app is private. Use an invitation code to join." : null);
+        }
+      }).catch((error: unknown) => {
+        if (active) {
+          setMembershipStatus("private");
+          setAuthError(error instanceof Error ? error.message : String(error));
+        }
+      });
+    } catch (error) {
+      setMembershipStatus("private");
+      setAuthError(error instanceof Error ? error.message : String(error));
+    }
+    return () => { active = false; };
+  }, [authUser]);
+
+  useEffect(() => {
+    if (!authUser || membershipStatus !== "member") {
       setSetupError(null);
       return;
     }
@@ -578,7 +733,7 @@ function App() {
       if (active) setSetupError(error instanceof Error ? error.message : String(error));
     });
     return () => { active = false; };
-  }, [authUser]);
+  }, [authUser, membershipStatus]);
 
   async function continueWithGoogle() {
     setAuthBusy(true);
@@ -586,14 +741,7 @@ function App() {
     try {
       const provider = new GoogleAuthProvider();
       provider.setCustomParameters({ prompt: "select_account" });
-      const credential = await signInWithPopup(getFirebaseAuth(), provider);
-      if (
-        credential.user.email?.toLocaleLowerCase() !== KITCHEN_OWNER_EMAIL
-        || !credential.user.emailVerified
-      ) {
-        await signOut(getFirebaseAuth());
-        throw new Error(`Use the authorized Google account (${KITCHEN_OWNER_EMAIL}).`);
-      }
+      await signInWithPopup(getFirebaseAuth(), provider);
       showToast("Signed in successfully.");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -615,16 +763,33 @@ function App() {
     }
   }
 
-  if (authLoading) return <PageMessage>Checking sign-in…</PageMessage>;
-  if (
-    !authUser
-    || authUser.email?.toLocaleLowerCase() !== KITCHEN_OWNER_EMAIL
-    || !authUser.emailVerified
-  ) {
+  async function joinKitchen(code: string) {
+    setAuthBusy(true);
+    setAuthError(null);
+    try {
+      const join = httpsCallable<{ code: string }, { status: "member" }>(getCloudFunctions(), "joinHousehold");
+      await join({ code });
+      setMembershipStatus("member");
+      setAuthError(null);
+      showToast("Joined the kitchen.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setAuthError(message);
+      showToast(message, "error");
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  if (authLoading || (authUser && membershipStatus === "checking")) return <PageMessage>Checking sign-in…</PageMessage>;
+  if (!authUser || membershipStatus !== "member") {
     return <SignInGate
-      error={authError ?? (authUser ? `Use the authorized Google account (${KITCHEN_OWNER_EMAIL}).` : null)}
+      error={authError}
       loading={authBusy}
       onSignIn={() => void continueWithGoogle()}
+      privateAccess={Boolean(authUser)}
+      onJoin={joinKitchen}
+      onSignOut={() => void leaveKitchen()}
     />;
   }
 

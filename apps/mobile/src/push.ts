@@ -3,7 +3,7 @@ import * as Device from "expo-device";
 import * as Notifications from "expo-notifications";
 import { Platform } from "react-native";
 import { doc, serverTimestamp, setDoc } from "firebase/firestore";
-import { getDatabase } from "./firebase";
+import { getDatabase, getFirebaseAuth } from "./firebase";
 
 const PUSH_NOTIFICATIONS_ENABLED = false;
 
@@ -32,11 +32,14 @@ export async function registerForPushNotifications(): Promise<string> {
   }
 
   const pushToken = (await Notifications.getExpoPushTokenAsync({ projectId })).data;
+  const uid = getFirebaseAuth().currentUser?.uid;
+  if (!uid) throw new Error("Sign in before registering this device for notifications.");
   if (Platform.OS !== "ios" && Platform.OS !== "android") {
     return "Push registration is available on iOS and Android only.";
   }
   await setDoc(doc(getDatabase(), "kitchen/main/devices", pushToken), {
     platform: Platform.OS,
+    uid,
     updatedAt: serverTimestamp()
   }, { merge: true });
   return "This device is registered for kitchen reminders.";

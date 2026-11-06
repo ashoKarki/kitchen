@@ -2,38 +2,67 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     match /kitchen/main {
-      allow read: if isKitchenOwner();
-      allow create, update: if isKitchenOwner() && validSettings(request.resource.data);
+      allow read: if isMember();
+      allow create: if isKitchenOwner() && validInitialSettings(request.resource.data);
+      allow update: if isMember()
+        && validSettings(request.resource.data)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'reminderEnabled',
+          'reminderHour',
+          'timeZone',
+          'budgetAlertsEnabled',
+          'discretionaryCategories',
+          'memberProfiles'
+        ])
+        && validOwnMemberProfileUpdate();
       allow delete: if false;
 
       match /items/{itemId} {
-        allow read: if isKitchenOwner();
-        allow create, update: if isKitchenOwner() && validItem(request.resource.data);
-        allow delete: if isKitchenOwner();
+        allow read: if isMember();
+        allow create, update: if isMember() && validItem(request.resource.data);
+        allow delete: if isMember();
       }
 
       match /devices/{deviceId} {
-        allow read: if isKitchenOwner();
-        allow create, update: if isKitchenOwner()
-          && request.resource.data.keys().hasOnly(['platform', 'updatedAt'])
+        allow read: if isMember();
+        allow create: if isMember()
+          && request.resource.data.keys().hasOnly(['platform', 'updatedAt', 'uid'])
           && request.resource.data.keys().hasAll(['platform', 'updatedAt'])
           && request.resource.data.platform in ['ios', 'android']
+          && request.resource.data.uid == request.auth.uid
           && request.resource.data.updatedAt is timestamp;
-        allow delete: if isKitchenOwner();
+        allow update: if isMember()
+          && request.resource.data.keys().hasOnly(['platform', 'updatedAt', 'uid'])
+          && request.resource.data.keys().hasAll(['platform', 'updatedAt'])
+          && request.resource.data.platform in ['ios', 'android']
+          && (
+            request.resource.data.uid == request.auth.uid
+            || (
+              isKitchenOwner()
+              && !resource.data.keys().hasAny(['uid'])
+              && !request.resource.data.keys().hasAny(['uid'])
+            )
+          )
+          && request.resource.data.updatedAt is timestamp;
+        allow delete: if isMember()
+          && (
+            resource.data.uid == request.auth.uid
+            || (isKitchenOwner() && !resource.data.keys().hasAny(['uid']))
+          );
       }
 
       match /receipts/{receiptId} {
-        allow read: if isKitchenOwner();
-        allow create, update: if isKitchenOwner() && validReceipt(request.resource.data);
-        allow delete: if isKitchenOwner();
+        allow read: if isMember();
+        allow create, update: if isMember() && validReceipt(request.resource.data);
+        allow delete: if isMember();
       }
 
       match /budgets/{budgetId} {
-        allow read: if isKitchenOwner();
-        allow create: if isKitchenOwner()
+        allow read: if isMember();
+        allow create: if isMember()
           && validBudget(request.resource.data)
           && !request.resource.data.keys().hasAny(['alertState']);
-        allow update: if isKitchenOwner()
+        allow update: if isMember()
           && validBudget(request.resource.data)
           && (
             (!request.resource.data.keys().hasAny(['alertState'])
@@ -44,26 +73,34 @@ service cloud.firestore {
               && request.resource.data.alertState == resource.data.alertState
             )
           );
-        allow delete: if isKitchenOwner();
+        allow delete: if isMember();
       }
 
       match /alerts/{alertId} {
-        allow read: if isKitchenOwner();
+        allow read: if isMember();
         allow create: if false;
-        allow update: if isKitchenOwner()
+        allow update: if isMember()
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read'])
           && request.resource.data.read is bool;
-        allow delete: if isKitchenOwner();
+        allow delete: if isMember();
       }
 
       match /insights/{insightId} {
-        allow read: if isKitchenOwner();
+        allow read: if isMember();
         allow write: if false;
       }
 
       match /usage/{usageId} {
-        allow read: if isKitchenOwner();
+        allow read: if isMember();
         allow write: if false;
+      }
+
+      match /memberSettings/{uid} {
+        allow read: if isMember() && request.auth.uid == uid;
+        allow create, update: if isMember()
+          && request.auth.uid == uid
+          && validMemberSettings(request.resource.data);
+        allow delete: if false;
       }
 
       match /{document=**} {
@@ -73,6 +110,20 @@ service cloud.firestore {
 
     match /{document=**} {
       allow read, write: if false;
+    }
+
+    function isMember() {
+      return (
+          request.auth != null
+          && request.auth.token.email is string
+          && request.auth.token.email_verified == true
+          && exists(/databases/$(database)/documents/kitchen/main)
+          && get(/databases/$(database)/documents/kitchen/main).data.members is map
+          && request.auth.uid in get(/databases/$(database)/documents/kitchen/main).data.members.keys()
+          && get(/databases/$(database)/documents/kitchen/main).data.members[request.auth.uid] in ['owner', 'member']
+        )
+        // REMOVE AFTER BOOTSTRAP VERIFIED: retain access for the original owner during rollout.
+        || isKitchenOwner();
     }
 
     function isKitchenOwner() {
@@ -87,7 +138,10 @@ service cloud.firestore {
           'reminderHour',
           'timeZone',
           'budgetAlertsEnabled',
-          'discretionaryCategories'
+          'discretionaryCategories',
+          'ownerUid',
+          'members',
+          'memberProfiles'
         ])
         && data.reminderEnabled is bool
         && data.reminderHour is int
@@ -95,7 +149,66 @@ service cloud.firestore {
         && data.reminderHour <= 23
         && data.timeZone is string
         && data.budgetAlertsEnabled is bool
-        && data.discretionaryCategories is list;
+        && data.discretionaryCategories is list
+        && (!data.keys().hasAny(['ownerUid']) || data.ownerUid is string)
+        && (!data.keys().hasAny(['members']) || data.members is map)
+        && (!data.keys().hasAny(['memberProfiles']) || data.memberProfiles is map);
+    }
+
+    function validInitialSettings(data) {
+      return validSettings(data)
+        && !data.keys().hasAny(['ownerUid', 'members', 'memberProfiles']);
+    }
+
+    function validOwnMemberProfileUpdate() {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(['memberProfiles'])
+        || (
+          request.resource.data.memberProfiles is map
+          && resource.data.memberProfiles is map
+          && request.resource.data.memberProfiles.diff(resource.data.memberProfiles)
+            .affectedKeys().hasOnly([request.auth.uid])
+          && request.resource.data.memberProfiles[request.auth.uid] is map
+          && request.resource.data.memberProfiles[request.auth.uid].keys().hasOnly(['displayName', 'photoURL'])
+          && request.resource.data.memberProfiles[request.auth.uid].displayName is string
+          && request.resource.data.memberProfiles[request.auth.uid].photoURL is string
+        );
+    }
+
+    function validMemberSettings(data) {
+      return data.keys().hasOnly([
+          'reminderEnabled',
+          'reminderHour',
+          'expiryWarnDays',
+          'budgetAlertsEnabled',
+          'weeklySummaryEnabled',
+          'language',
+          'theme',
+          'diet',
+          'dislikes',
+          'servings',
+          'maxCookingTimeMinutes',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.reminderEnabled is bool
+        && data.reminderHour is int
+        && data.reminderHour >= 0
+        && data.reminderHour <= 23
+        && data.expiryWarnDays is int
+        && data.expiryWarnDays >= 0
+        && data.expiryWarnDays <= 30
+        && data.budgetAlertsEnabled is bool
+        && data.weeklySummaryEnabled is bool
+        && data.language is string
+        && data.theme in ['system', 'light', 'dark']
+        && data.diet is list
+        && data.dislikes is list
+        && data.servings is int
+        && data.servings >= 1
+        && data.servings <= 20
+        && data.maxCookingTimeMinutes is int
+        && data.maxCookingTimeMinutes >= 1
+        && data.maxCookingTimeMinutes <= 600;
     }
 
     function validItem(data) {

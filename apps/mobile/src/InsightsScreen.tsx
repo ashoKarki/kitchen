@@ -13,7 +13,6 @@ import { useBudgets } from "./useBudgetData";
 import { useToast } from "./toast";
 
 interface GenerateInsightsRequest {
-  appKey: string;
   context: AiInsightContext;
 }
 
@@ -42,15 +41,7 @@ export default function InsightsScreen() {
   ), [budgets.data, receipts.data, settings.data?.discretionaryCategories, timeZone]);
   const loading = receipts.loading || budgets.loading || settings.loading;
   const loadError = receipts.error ?? budgets.error ?? settings.error;
-  const appKey = process.env.EXPO_PUBLIC_APP_KEY;
-
   async function generateAiInsights() {
-    if (!appKey) {
-      const message = "AI insights are not configured. Set EXPO_PUBLIC_APP_KEY and deploy the Functions secrets.";
-      setError(message);
-      showToast(message, "error");
-      return;
-    }
     setAiBusy(true);
     setError(null);
     setNotice(null);
@@ -59,7 +50,7 @@ export default function InsightsScreen() {
         getCloudFunctions(),
         "generateInsights"
       );
-      const response = await generate({ appKey, context: report.aiContext });
+      const response = await generate({ context: report.aiContext });
       setAiInsights(response.data);
       setNotice("AI insight generated from aggregate totals and categories only.");
       showToast("AI insight generated.");
@@ -105,10 +96,9 @@ export default function InsightsScreen() {
         <Text style={styles.eyebrow}>OPTIONAL AI SUMMARY</Text>
         <Text style={styles.sectionTitle}>Ask for a narrative</Text>
         <Text style={styles.muted}>Only aggregate period totals, categories, and budget progress are sent. Receipt images, item names, and store names are not sent.</Text>
-        <Pressable accessibilityRole="button" disabled={aiBusy || !appKey} onPress={() => void generateAiInsights()} style={[styles.aiButton, (aiBusy || !appKey) && styles.disabledButton]}>
+        <Pressable accessibilityRole="button" disabled={aiBusy} onPress={() => void generateAiInsights()} style={[styles.aiButton, aiBusy && styles.disabledButton]}>
           <Text style={styles.aiButtonText}>{aiBusy ? "Generating…" : "Generate AI insights"}</Text>
         </Pressable>
-        {!appKey && <Text style={styles.hint}>Configure EXPO_PUBLIC_APP_KEY and the server-side Anthropic secret to enable AI insights.</Text>}
         {aiInsights && <View style={styles.aiResult}>
           <Text style={styles.messageDetail}>{aiInsights.summary}</Text>
           {aiInsights.observations.map((entry, index) => <Text style={styles.bullet} key={`observation-${index}`}>• {entry}</Text>)}

@@ -1,13 +1,15 @@
-import { useState } from "react";
-import { Pressable, ScrollView, StyleSheet, Switch, Text, View } from "react-native";
+import { useEffect, useState } from "react";
+import { Alert, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from "react-native";
+import { FirebaseError } from "firebase/app";
 import { signOut } from "firebase/auth";
+import { httpsCallable } from "firebase/functions";
 import RNPickerSelect from "react-native-picker-select";
 import {
   expenseCategories,
   updateSettings,
   type ExpenseCategory
 } from "@my-kitchen/shared";
-import { getDatabase, getFirebaseAuth } from "../../src/firebase";
+import { getCloudFunctions, getDatabase, getFirebaseAuth } from "../../src/firebase";
 import { registerForPushNotifications } from "../../src/push";
 import { usePushStatus } from "../../src/pushStatus";
 import { useToast } from "../../src/toast";
@@ -26,7 +28,7 @@ export default function SettingsScreen() {
     setSaving(true);
     setSaveError(null);
     try {
-      await updateSettings(getDatabase(), changes);
+      await updateSettings(getDatabase(), changes, getFirebaseAuth().currentUser?.uid);
       showToast("Settings saved.");
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : String(caught);
@@ -72,6 +74,7 @@ export default function SettingsScreen() {
       <Text style={styles.eyebrow}>MAKE IT YOURS</Text>
       <Text style={styles.title}>Settings</Text>
       <Text style={styles.subtitle}>Manage reminders and how your spending is categorized.</Text>
+      <HouseholdSettings />
       {saveError && <Text accessibilityRole="alert" style={styles.error}>{saveError}</Text>}
       {saving && <Text accessibilityLiveRegion="polite" style={styles.hint}>Saving…</Text>}
 
@@ -115,7 +118,7 @@ export default function SettingsScreen() {
 
       <View style={styles.card}>
         <Text style={styles.sectionTitle}>Budget alerts</Text>
-        <Text style={styles.muted}>Receive an in-app and push alert when an active budget reaches 80% or 100%.</Text>
+        <Text style={styles.muted}>Receive an in-app and push alert as an active budget reaches its warning thresholds and goes over budget.</Text>
         <View style={styles.row}>
           <Text style={styles.rowText}>Enable budget alerts</Text>
           <Switch
@@ -169,6 +172,135 @@ export default function SettingsScreen() {
   );
 }
 
+interface HouseholdMemberInfo {
+  uid: string;
+  role: "owner" | "member";
+  displayName: string;
+}
+
+function HouseholdSettings() {
+  const { showToast } = useToast();
+  const [members, setMembers] = useState<HouseholdMemberInfo[] | null>(null);
+  const [email, setEmail] = useState("");
+  const [inviteCode, setInviteCode] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function loadMembers() {
+    try {
+      const list = httpsCallable<void, { members: HouseholdMemberInfo[] }>(
+        getCloudFunctions(),
+        "listHouseholdMembers"
+      );
+      const response = await list();
+      setMembers(response.data.members);
+    } catch (caught) {
+      if (caught instanceof FirebaseError && caught.code === "functions/permission-denied") {
+        setMembers([]);
+        setError(null);
+      } else {
+        setError(caught instanceof Error ? caught.message : String(caught));
+      }
+    }
+  }
+
+  useEffect(() => {
+    void loadMembers();
+  }, []);
+
+  async function createInvite() {
+    setBusy(true);
+    setError(null);
+    setInviteCode(null);
+    try {
+      const create = httpsCallable<{ email?: string }, { code: string }>(
+        getCloudFunctions(),
+        "createInvite"
+      );
+      const response = await create(email.trim() ? { email: email.trim() } : {});
+      setInviteCode(response.data.code);
+      setEmail("");
+      showToast("Invitation code created; it expires in 48 hours.");
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : String(caught);
+      setError(message);
+      showToast(message, "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function manageMember(uid: string, operation: "removeHouseholdMember" | "transferOwnership") {
+    setBusy(true);
+    setError(null);
+    try {
+      const invoke = httpsCallable<{ uid: string }, { status: string }>(getCloudFunctions(), operation);
+      await invoke({ uid });
+      await loadMembers();
+      showToast(operation === "removeHouseholdMember" ? "Member removed." : "Ownership transferred.");
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : String(caught);
+      setError(message);
+      showToast(message, "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (members === null && !error) {
+    return <View style={styles.card}><Text style={styles.muted}>Loading household settings…</Text></View>;
+  }
+  if (members?.length === 0 && !error) return null;
+  return (
+    <View style={styles.card}>
+      <Text style={styles.sectionTitle}>Household</Text>
+      <Text style={styles.muted}>Create a single-use invitation code that expires after 48 hours.</Text>
+      {error && <Text accessibilityRole="alert" style={styles.error}>{error}</Text>}
+      <TextInput
+        accessibilityLabel="Email lock for invitation"
+        autoCapitalize="none"
+        autoComplete="email"
+        keyboardType="email-address"
+        onChangeText={setEmail}
+        placeholder="Email lock (optional)"
+        style={styles.inviteInput}
+        value={email}
+      />
+      <Pressable accessibilityRole="button" disabled={busy} onPress={() => void createInvite()} style={styles.smallButton}>
+        <Text style={styles.smallButtonText}>{busy ? "Working…" : "Create invitation"}</Text>
+      </Pressable>
+      {inviteCode && <Text selectable style={styles.success}>Share this code with your partner; it is shown once: {inviteCode}</Text>}
+      {members?.filter((member) => member.role !== "owner").map((member) => (
+        <View key={member.uid} style={styles.memberRow}>
+          <Text style={styles.rowText}>{member.displayName || "Kitchen member"}</Text>
+          <View style={styles.memberActions}>
+            <Pressable accessibilityRole="button" disabled={busy} onPress={() => Alert.alert(
+              "Transfer ownership?",
+              `Transfer ownership to ${member.displayName || "this member"}?`,
+              [
+                { text: "Cancel", style: "cancel" },
+                { text: "Transfer", onPress: () => void manageMember(member.uid, "transferOwnership") }
+              ]
+            )}>
+              <Text style={styles.memberAction}>Transfer</Text>
+            </Pressable>
+            <Pressable accessibilityRole="button" disabled={busy} onPress={() => Alert.alert(
+              "Remove member?",
+              `Remove ${member.displayName || "this member"} from the household?`,
+              [
+                { text: "Cancel", style: "cancel" },
+                { text: "Remove", style: "destructive", onPress: () => void manageMember(member.uid, "removeHouseholdMember") }
+              ]
+            )}>
+              <Text style={styles.memberAction}>Remove</Text>
+            </Pressable>
+          </View>
+        </View>
+      ))}
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   page: { flex: 1, backgroundColor: "#f5f8f2" },
   content: { padding: 18, paddingBottom: 36 },
@@ -189,5 +321,10 @@ const styles = StyleSheet.create({
   smallButton: { backgroundColor: "#edf2ed", borderRadius: 8, alignSelf: "flex-start", marginTop: 10, paddingVertical: 8, paddingHorizontal: 10 },
   disabledButton: { opacity: 0.55 },
   smallButtonText: { color: "#47584c", fontSize: 12, fontWeight: "600" },
+  inviteInput: { borderWidth: 1, borderColor: "#dce4dc", borderRadius: 8, color: "#394b3e", paddingHorizontal: 12, paddingVertical: 10, marginTop: 12 },
+  success: { color: "#286b4f", backgroundColor: "#edf7ef", borderRadius: 8, padding: 10, marginTop: 12, fontSize: 12 },
+  memberRow: { minHeight: 48, borderTopColor: "#eff2ef", borderTopWidth: 1, flexDirection: "row", alignItems: "center", marginTop: 10, paddingTop: 8 },
+  memberActions: { flexDirection: "row", gap: 14 },
+  memberAction: { color: "#286b4f", fontSize: 12, fontWeight: "700" },
   error: { color: "#a53b32", backgroundColor: "#fff0ee", padding: 10, borderRadius: 8, marginBottom: 10 }
 });

@@ -35,7 +35,6 @@ import { useToast } from "./toast";
 interface ScanReceiptRequest {
   imageBase64: string;
   mimeType: "image/jpeg" | "image/png";
-  appKey: string;
 }
 
 function localDateKey(date = new Date()): string {
@@ -261,14 +260,11 @@ export default function ReceiptsPage() {
     setError(null);
     setNotice(null);
     try {
-      const appKey = import.meta.env.VITE_APP_KEY;
-      if (!appKey) throw new Error("Receipt scanning is not configured. Set VITE_APP_KEY in apps/web/.env.");
       const imageBase64 = await fileToBase64(file);
       const scanner = httpsCallable<ScanReceiptRequest, ScannedReceipt>(getCloudFunctions(), "scanReceipt");
       const result = await scanner({
         imageBase64,
-        mimeType: "image/jpeg",
-        appKey
+        mimeType: "image/jpeg"
       });
       const scannedDuplicate = receipts.data?.some(({ receipt }) => (
         receipt.dedupeHash === dedupeHash(

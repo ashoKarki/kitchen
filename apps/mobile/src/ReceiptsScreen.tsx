@@ -56,7 +56,6 @@ import { useItems } from "./useItems";
 interface ScanReceiptRequest {
   imageBase64: string;
   mimeType: "image/jpeg" | "image/png";
-  appKey: string;
 }
 
 function localDateKey(date = new Date()): string {
@@ -179,8 +178,6 @@ export default function ReceiptsScreen() {
     setError(null);
     setNotice(null);
     try {
-      const appKey = process.env.EXPO_PUBLIC_APP_KEY;
-      if (!appKey) throw new Error("Receipt scanning is not configured. Set EXPO_PUBLIC_APP_KEY in apps/mobile/.env.");
       const actions: ImageManipulator.Action[] = asset.width > 1568 || asset.height > 1568
         ? [{ resize: asset.width >= asset.height ? { width: 1568 } : { height: 1568 } }]
         : [];
@@ -193,8 +190,7 @@ export default function ReceiptsScreen() {
       const scanner = httpsCallable<ScanReceiptRequest, ScannedReceipt>(getCloudFunctions(), "scanReceipt");
       const result = await scanner({
         imageBase64: compressed.base64,
-        mimeType: "image/jpeg",
-        appKey
+        mimeType: "image/jpeg"
       });
       const scannedDuplicate = receipts.data?.some(({ receipt }) => (
         receipt.dedupeHash === dedupeHash(

@@ -50,6 +50,32 @@ function readSettings(value: unknown): Settings {
   return result.data;
 }
 
+function memberAlertPreference(value: unknown, fallback: boolean): boolean {
+  if (
+    typeof value === "object"
+    && value !== null
+    && "budgetAlertsEnabled" in value
+    && typeof value.budgetAlertsEnabled === "boolean"
+  ) {
+    return value.budgetAlertsEnabled;
+  }
+  return fallback;
+}
+
+async function anyMemberHasBudgetAlerts(db: Firestore, fallback: boolean): Promise<boolean> {
+  const kitchen = await db.doc("kitchen/main").get();
+  const members: unknown = kitchen.get("members");
+  if (typeof members !== "object" || members === null || Array.isArray(members)) return fallback;
+  const uids = Object.entries(members)
+    .filter(([, role]) => role === "owner" || role === "member")
+    .map(([uid]) => uid);
+  if (uids.length === 0) return fallback;
+  const settings = await Promise.all(uids.map((uid) => (
+    db.doc(`kitchen/main/memberSettings/${uid}`).get()
+  )));
+  return settings.some((snapshot) => memberAlertPreference(snapshot.data(), fallback));
+}
+
 function shouldReevaluateBudget(before: DocumentData | undefined, after: DocumentData | undefined): boolean {
   if (!after) return false;
   if (!before) return true;
@@ -65,7 +91,7 @@ function shouldReevaluateSettings(before: DocumentData | undefined, after: Docum
 }
 
 async function evaluateBudget(db: Firestore, budgetId: string, settings: Settings): Promise<void> {
-  if (!settings.budgetAlertsEnabled) return;
+  if (!await anyMemberHasBudgetAlerts(db, settings.budgetAlertsEnabled)) return;
   const budgetRef = db.doc(`kitchen/main/budgets/${budgetId}`);
   const budgetSnapshot = await budgetRef.get();
   if (!budgetSnapshot.exists) return;
@@ -122,7 +148,7 @@ async function evaluateBudget(db: Firestore, budgetId: string, settings: Setting
 }
 
 async function evaluateAllBudgets(db: Firestore, settings: Settings): Promise<void> {
-  if (!settings.budgetAlertsEnabled) return;
+  if (!await anyMemberHasBudgetAlerts(db, settings.budgetAlertsEnabled)) return;
   const budgets = await db.collection("kitchen/main/budgets").get();
   await Promise.all(budgets.docs.map((budget) => evaluateBudget(db, budget.id, settings)));
 }
@@ -157,6 +183,18 @@ export const evaluateBudgetAfterSettingsChange = onDocumentWritten(
   }
 );
 
+export const evaluateBudgetAfterMemberSettingsChange = onDocumentWritten(
+  { document: "kitchen/main/memberSettings/{uid}", retry: true },
+  async (event) => {
+    if (JSON.stringify(event.data?.before.get("budgetAlertsEnabled")) === JSON.stringify(event.data?.after.get("budgetAlertsEnabled"))) {
+      return;
+    }
+    const db = getFirestore();
+    const settings = readSettings((await db.doc("kitchen/main").get()).data());
+    await evaluateAllBudgets(db, settings);
+  }
+);
+
 export const sendBudgetAlertPush = onDocumentCreated(
   { document: "kitchen/main/alerts/{alertId}", retry: true, timeoutSeconds: 300, maxInstances: 2 },
   async (event) => {
@@ -170,7 +208,22 @@ export const sendBudgetAlertPush = onDocumentCreated(
       amountCents: z.number().int()
     }).parse(event.data?.data());
     const devices = await db.collection("kitchen/main/devices").get();
-    const tokens = devices.docs.map((device) => device.id);
+    const preferences = new Map<string, boolean>();
+    const tokens: string[] = [];
+    for (const device of devices.docs) {
+      const uid: unknown = device.get("uid");
+      if (typeof uid !== "string") {
+        if (settings.budgetAlertsEnabled) tokens.push(device.id);
+        continue;
+      }
+      let enabled = preferences.get(uid);
+      if (enabled === undefined) {
+        const memberSettings = await db.doc(`kitchen/main/memberSettings/${uid}`).get();
+        enabled = memberAlertPreference(memberSettings.data(), settings.budgetAlertsEnabled);
+        preferences.set(uid, enabled);
+      }
+      if (enabled) tokens.push(device.id);
+    }
     if (tokens.length === 0) return;
     await sendExpoPush(
       tokens,

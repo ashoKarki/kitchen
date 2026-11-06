@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { doc, getDocFromServer, onSnapshot } from "firebase/firestore";
-import { ensureSettings, expenseCategories, KITCHEN_DOC_PATH } from "@my-kitchen/shared";
+import { ensureSettings, expenseCategories, KITCHEN_DOC_PATH, memberSettingsDocument } from "@my-kitchen/shared";
 import type { KitchenSettings } from "@my-kitchen/shared";
 import { z } from "zod";
-import { getDatabase } from "./firebase";
+import { getDatabase, getFirebaseAuth } from "./firebase";
 
 const settingsSchema = z.object({
   reminderEnabled: z.boolean(),
@@ -12,39 +12,71 @@ const settingsSchema = z.object({
   budgetAlertsEnabled: z.boolean(),
   discretionaryCategories: z.array(z.enum(expenseCategories))
 });
+const memberSettingsSchema = z.object({
+  reminderEnabled: z.boolean().optional(),
+  reminderHour: z.number().int().min(0).max(23).optional(),
+  budgetAlertsEnabled: z.boolean().optional()
+});
+
+function readMemberSettings(value: unknown): Partial<Pick<KitchenSettings, "reminderEnabled" | "reminderHour" | "budgetAlertsEnabled">> {
+  const parsed = memberSettingsSchema.parse(value);
+  return {
+    ...(parsed.reminderEnabled === undefined ? {} : { reminderEnabled: parsed.reminderEnabled }),
+    ...(parsed.reminderHour === undefined ? {} : { reminderHour: parsed.reminderHour }),
+    ...(parsed.budgetAlertsEnabled === undefined ? {} : { budgetAlertsEnabled: parsed.budgetAlertsEnabled })
+  };
+}
 
 export function useSettings() {
   const [data, setData] = useState<KitchenSettings | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
+  const memberUid = getFirebaseAuth().currentUser?.uid;
+
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const snapshot = await getDocFromServer(doc(getDatabase(), KITCHEN_DOC_PATH));
-      setData(settingsSchema.parse(snapshot.data()));
+      const db = getDatabase();
+      const [snapshot, memberSnapshot] = await Promise.all([
+        getDocFromServer(doc(db, KITCHEN_DOC_PATH)),
+        memberUid ? getDocFromServer(memberSettingsDocument(db, memberUid)) : Promise.resolve(null)
+      ]);
+      const kitchenSettings = settingsSchema.parse(snapshot.data());
+      const memberSettings = memberSnapshot?.exists()
+        ? readMemberSettings(memberSnapshot.data())
+        : {};
+      setData({ ...kitchenSettings, ...memberSettings });
       setError(null);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [memberUid]);
 
   useEffect(() => {
-    let unsubscribe: (() => void) | undefined;
+    const unsubscribers: Array<() => void> = [];
     let cancelled = false;
+    let kitchenSettings: KitchenSettings | null = null;
+    let memberSettings: Partial<Pick<KitchenSettings, "reminderEnabled" | "reminderHour" | "budgetAlertsEnabled">> = {};
+    const publish = () => {
+      if (kitchenSettings) {
+        setData({ ...kitchenSettings, ...memberSettings });
+        setError(null);
+        setLoading(false);
+      }
+    };
     async function subscribe() {
       try {
         const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
         const db = getDatabase();
         await ensureSettings(db, timeZone);
         if (cancelled) return;
-        unsubscribe = onSnapshot(doc(db, KITCHEN_DOC_PATH), (snapshot) => {
+        unsubscribers.push(onSnapshot(doc(db, KITCHEN_DOC_PATH), (snapshot) => {
           try {
-            setData(settingsSchema.parse(snapshot.data()));
-            setError(null);
-            setLoading(false);
+            kitchenSettings = settingsSchema.parse(snapshot.data());
+            publish();
           } catch (caught) {
             setData(null);
             setError(caught instanceof Error ? caught.message : String(caught));
@@ -54,7 +86,23 @@ export function useSettings() {
           setData(null);
           setError(caught.message);
           setLoading(false);
-        });
+        }));
+        if (memberUid) {
+          unsubscribers.push(onSnapshot(memberSettingsDocument(db, memberUid), (snapshot) => {
+            try {
+              memberSettings = snapshot.exists() ? readMemberSettings(snapshot.data()) : {};
+              publish();
+            } catch (caught) {
+              setData(null);
+              setError(caught instanceof Error ? caught.message : String(caught));
+              setLoading(false);
+            }
+          }, (caught) => {
+            setData(null);
+            setError(caught.message);
+            setLoading(false);
+          }));
+        }
       } catch (caught) {
         if (cancelled) return;
         setError(caught instanceof Error ? caught.message : String(caught));
@@ -64,9 +112,9 @@ export function useSettings() {
     void subscribe();
     return () => {
       cancelled = true;
-      unsubscribe?.();
+      for (const unsubscribe of unsubscribers) unsubscribe();
     };
-  }, []);
+  }, [memberUid]);
 
   return { data, error, loading, refresh };
 }
