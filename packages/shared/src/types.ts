@@ -36,7 +36,7 @@ export interface Budget extends BudgetDraft {
   updatedAt: Timestamp;
   alertState?: {
     periodKey: string;
-    sentThresholds: Array<80 | 100>;
+    sentThresholds: number[];
   } | undefined;
 }
 
@@ -45,7 +45,7 @@ export interface BudgetAlert {
   budgetName: string;
   period: BudgetPeriod;
   periodKey: string;
-  thresholdPercent: 80 | 100;
+  thresholdPercent: number;
   amountCents: number;
   spentCents: number;
   read: boolean;

@@ -28,7 +28,7 @@ const budgetSchema = z.object({
   active: z.boolean(),
   alertState: z.object({
     periodKey: z.string(),
-    sentThresholds: z.array(z.union([z.literal(80), z.literal(100)]))
+    sentThresholds: z.array(z.number().int().min(70))
   }).optional()
 });
 const receiptSchema = z.object({
@@ -165,7 +165,7 @@ export const sendBudgetAlertPush = onDocumentCreated(
     if (!settings.budgetAlertsEnabled) return;
     const alert = z.object({
       budgetName: z.string().min(1),
-      thresholdPercent: z.union([z.literal(80), z.literal(100)]),
+      thresholdPercent: z.number().int().min(70),
       spentCents: z.number().int(),
       amountCents: z.number().int()
     }).parse(event.data?.data());

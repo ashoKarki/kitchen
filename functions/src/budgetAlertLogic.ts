@@ -1,12 +1,12 @@
-import { getReachedBudgetThresholds } from "../../packages/shared/src/budgetAnalytics.js";
+import { getHighestReachedBudgetThreshold } from "../../packages/shared/src/budgetAnalytics.js";
 
 export interface BudgetAlertState {
   periodKey: string;
-  sentThresholds: Array<80 | 100>;
+  sentThresholds: number[];
 }
 
 export interface BudgetAlertDecision {
-  thresholds: Array<80 | 100>;
+  thresholds: number[];
   state: BudgetAlertState;
 }
 
@@ -19,8 +19,11 @@ export function decideBudgetAlerts(
   const sentThresholds = currentState?.periodKey === periodKey
     ? currentState.sentThresholds
     : [];
-  const thresholds = getReachedBudgetThresholds(spentCents, amountCents)
-    .filter((threshold) => !sentThresholds.includes(threshold));
+  const highestSentThreshold = sentThresholds.reduce((highest, threshold) => Math.max(highest, threshold), 0);
+  const highestReachedThreshold = getHighestReachedBudgetThreshold(spentCents, amountCents);
+  const thresholds = highestReachedThreshold !== null && highestReachedThreshold > highestSentThreshold
+    ? [highestReachedThreshold]
+    : [];
   return {
     thresholds,
     state: {

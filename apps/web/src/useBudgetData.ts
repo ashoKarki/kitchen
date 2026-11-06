@@ -22,7 +22,7 @@ const budgetSchema = z.object({
   active: z.boolean(),
   alertState: z.object({
     periodKey: z.string(),
-    sentThresholds: z.array(z.union([z.literal(80), z.literal(100)]))
+    sentThresholds: z.array(z.number().int().min(70))
   }).optional(),
   createdAt: z.instanceof(Timestamp),
   updatedAt: z.instanceof(Timestamp)
@@ -32,7 +32,7 @@ const alertSchema = z.object({
   budgetName: z.string(),
   period: z.enum(["weekly", "monthly"]),
   periodKey: z.string(),
-  thresholdPercent: z.union([z.literal(80), z.literal(100)]),
+  thresholdPercent: z.number().int().min(70),
   amountCents: z.number().int().positive(),
   spentCents: z.number().int(),
   read: z.boolean(),
