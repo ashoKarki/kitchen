@@ -52,15 +52,26 @@ export function getBudgetSpendCents(
   ), 0);
 }
 
-export function getReachedBudgetThresholds(
+export function getHighestReachedBudgetThreshold(
   spentCents: number,
   budgetCents: number
-): Array<80 | 100> {
+): number | null {
   if (!Number.isSafeInteger(spentCents) || !Number.isSafeInteger(budgetCents) || budgetCents <= 0) {
     throw new RangeError("Budget amounts must be safe integer cents and the budget must be positive.");
   }
-  const reached: Array<80 | 100> = [];
-  if (BigInt(spentCents) * 100n >= BigInt(budgetCents) * 80n) reached.push(80);
-  if (spentCents >= budgetCents) reached.push(100);
-  return reached;
+  const scaledSpent = BigInt(spentCents) * 100n;
+  const budget = BigInt(budgetCents);
+  if (scaledSpent >= budget * 100n) {
+    const threshold = 100n + ((scaledSpent - budget * 100n) / (budget * 10n)) * 10n;
+    if (threshold > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new RangeError("Reached budget threshold exceeds the safe integer range.");
+    }
+    return Number(threshold);
+  }
+
+  const fixedThresholds = [98, 96, 94, 92, 90, 80, 70] as const;
+  for (const threshold of fixedThresholds) {
+    if (scaledSpent >= budget * BigInt(threshold)) return threshold;
+  }
+  return null;
 }

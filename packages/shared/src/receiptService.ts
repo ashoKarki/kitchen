@@ -7,11 +7,11 @@ import {
   updateDoc,
   type Firestore
 } from "firebase/firestore";
-import { KITCHEN_DOC_PATH } from "./constants.js";
+import { getKitchenDocPath } from "./constants.js";
 import type { ReceiptDraft } from "./types.js";
 
 function receiptCollection(db: Firestore) {
-  return collection(db, `${KITCHEN_DOC_PATH}/receipts`);
+  return collection(db, `${getKitchenDocPath()}/receipts`);
 }
 
 export async function createReceipt(db: Firestore, receipt: ReceiptDraft): Promise<string> {

@@ -173,7 +173,7 @@ export default function BudgetsScreen() {
         <View style={{ flex: 1 }}><Text style={styles.eyebrow}>PLAN YOUR SPENDING</Text><Text style={styles.title}>Budgets</Text></View>
         <Pressable accessibilityRole="button" onPress={() => openEditor()} style={styles.primaryButton}><Text style={styles.primaryText}>＋ Add</Text></Pressable>
       </View>
-      <Text style={styles.subtitle}>Weekly or monthly limits, with alerts at 80% and 100%.</Text>
+      <Text style={styles.subtitle}>Weekly or monthly limits, with alerts starting at 70%.</Text>
       {notice && <Text accessibilityLiveRegion="polite" style={styles.success}>{notice}</Text>}
       {error && <Text accessibilityRole="alert" style={styles.error}>{error}</Text>}
       {settings.data && !settings.data.budgetAlertsEnabled && <Text style={styles.warning}>Budget alerts are off in Settings. Current spending is still shown.</Text>}
@@ -209,7 +209,7 @@ export default function BudgetsScreen() {
         })}
 
       <View style={styles.alertHeading}><Text style={styles.eyebrow}>BUDGET ACTIVITY</Text><Text style={styles.sectionTitle}>Alerts</Text></View>
-      {!alerts.data?.length ? <View style={styles.empty}><Text style={styles.emptyTitle}>No budget alerts</Text><Text style={styles.muted}>Alerts appear when an active budget reaches 80% or 100%.</Text></View>
+      {!alerts.data?.length ? <View style={styles.empty}><Text style={styles.emptyTitle}>No budget alerts</Text><Text style={styles.muted}>Alerts appear when an active budget reaches a warning threshold, starting at 70%.</Text></View>
         : [...alerts.data].sort((a, b) => b.alert.createdAt.toMillis() - a.alert.createdAt.toMillis()).map(({ id, alert }) => (
           <View key={id} style={[styles.alertCard, !alert.read && styles.unreadAlert]}>
             <View style={{ flex: 1 }}><Text style={styles.budgetName}>{alert.budgetName}: {alert.thresholdPercent}% reached</Text><Text style={styles.scope}>{formatCents(alert.spentCents)} of {formatCents(alert.amountCents)} · {alert.periodKey}</Text></View>

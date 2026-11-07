@@ -7,13 +7,13 @@ import {
   expenseCategories,
   type ExpenseCategory
 } from "../../packages/shared/src/types.js";
-import { requireKitchenOwner } from "./auth.js";
+import { requireMember } from "./auth.js";
+import { enforceAppCheck } from "./household.js";
 import {
   classifyReceiptLines,
   parsedReceiptSchema
 } from "./receiptSchema.js";
 
-const appKeySecret = defineSecret("APP_KEY");
 const anthropicApiKey = defineSecret("ANTHROPIC_API_KEY");
 const anthropicModel = defineString("ANTHROPIC_MODEL", { default: "claude-sonnet-5-5" });
 const DAILY_SCAN_LIMIT = 40;
@@ -21,8 +21,7 @@ const MAX_IMAGE_BASE64_LENGTH = 8_000_000;
 
 const inputSchema = z.object({
   imageBase64: z.string().min(1).max(MAX_IMAGE_BASE64_LENGTH),
-  mimeType: z.enum(["image/jpeg", "image/png"]),
-  appKey: z.string().min(1).max(256)
+  mimeType: z.enum(["image/jpeg", "image/png"])
 });
 
 const systemPrompt = `You extract items from German-language retail receipts only, including Austrian German receipts such as BILLA. The printed text will be German; interpret German labels and Austrian retail conventions, and do not assume English labels. Return JSON only, with no markdown or prose, matching the requested schema. All amounts are signed integer euro cents, never decimal euros. German receipt numbers use a decimal comma (for example 1,29), a dot for thousands, and may use EUR or €. Convert dates from DD.MM.YYYY or DD.MM.YY to YYYY-MM-DD; if no valid date is visible, use a validation error rather than inventing one. The total may be labelled SUMME, GESAMT, or "Summe EUR". Prefer the retailer name (for example BILLA) for storeName, not its address or branch number. Read product descriptions and their corresponding amount column; ignore tax-letter columns such as C or D. On BILLA receipts, "Gegeben", "Kundenbeleg", card/payment details, and authorization numbers are not purchased items; use the first purchase date/time and ignore repeated payment slip details. Treat a line labelled PFANDARTIKEL or similar as a separate Deposit/Pfand item. Preserve printed product names in German in rawName; normalize name only enough to remove tax codes and unrelated receipt marks. Preserve discounts and Pfand returns as negative amounts. Classify each line into exactly one of: Groceries, Beverages, Cafe & Eating out, Snacks & Sweets, Alcohol, Tobacco, Household, Drugstore & Personal care, Deposit/Pfand, Other. Use null category only when genuinely uncertain. necessity must be essential, discretionary, or neutral. A Pfand deposit charged is a positive amount; Pfand return/credit is negative. Do not invent missing values. Use quantity 1 when no count is shown.`;
@@ -36,10 +35,10 @@ function categoriesFromSettings(value: unknown): ExpenseCategory[] {
   return parsed.data;
 }
 
-async function consumeDailyScan(): Promise<void> {
+async function consumeDailyScan(householdId: string): Promise<void> {
   const db = getFirestore();
   const dateKey = new Date().toISOString().slice(0, 10);
-  const usageRef = db.doc(`kitchen/main/usage/${dateKey}`);
+  const usageRef = db.doc(`kitchen/${householdId}/usage/${dateKey}`);
   await db.runTransaction(async (transaction) => {
     const snapshot = await transaction.get(usageRef);
     const count: unknown = snapshot.get("scans");
@@ -127,28 +126,26 @@ export const scanReceipt = onCall(
     invoker: "public",
     maxInstances: 2,
     timeoutSeconds: 60,
-    secrets: [appKeySecret, anthropicApiKey]
+    enforceAppCheck: enforceAppCheck.value(),
+    secrets: [anthropicApiKey]
   },
   async (request) => {
-    requireKitchenOwner(request);
+    const member = await requireMember(request);
     const parsedInput = inputSchema.safeParse(request.data);
     if (!parsedInput.success) {
       throw new HttpsError("invalid-argument", `Invalid scan request: ${parsedInput.error.issues[0]?.message ?? "invalid input"}`);
     }
-    if (parsedInput.data.appKey !== appKeySecret.value()) {
-      throw new HttpsError("permission-denied", "Receipt scan is not configured for this app.");
-    }
     if (!/^[A-Za-z0-9+/]+={0,2}$/.test(parsedInput.data.imageBase64)) {
       throw new HttpsError("invalid-argument", "Image data is not valid base64.");
     }
-    await consumeDailyScan();
+    await consumeDailyScan(member.householdId);
 
     const apiKey = anthropicApiKey.value();
     if (!apiKey) throw new HttpsError("failed-precondition", "Receipt scanning is not configured on the server.");
 
     try {
       const client = new Anthropic({ apiKey, timeout: 50_000, maxRetries: 1 });
-      const settings = await getFirestore().doc("kitchen/main").get();
+      const settings = await getFirestore().doc(`kitchen/${member.householdId}`).get();
       const discretionaryCategories = categoriesFromSettings(settings.data());
       const parsed = await requestParsedReceipt(
         client,
@@ -164,8 +161,7 @@ export const scanReceipt = onCall(
         console.error("Receipt scanning provider error", {
           name: error.name,
           status: error.status,
-          requestID: error.requestID,
-          message: error.message
+          requestID: error.requestID
         });
         if (error.status === 401 || error.status === 403) {
           throw new HttpsError(
@@ -200,7 +196,9 @@ export const scanReceipt = onCall(
           );
         }
       }
-      console.error("Receipt scanning failed", error);
+      console.error("Receipt scanning failed", {
+        name: error instanceof Error ? error.name : "UnknownError"
+      });
       throw new HttpsError("internal", "Receipt scan failed. Please retry or enter the expense manually.");
     }
   }

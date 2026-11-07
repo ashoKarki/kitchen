@@ -5,24 +5,28 @@ import {
   onSnapshot
 } from "firebase/firestore";
 import { Timestamp } from "firebase/firestore";
-import { expenseCategories, KITCHEN_DOC_PATH } from "@my-kitchen/shared";
+import { expenseCategories, getKitchenDocPath } from "@my-kitchen/shared";
 import type { KitchenItem } from "@my-kitchen/shared";
 import { z } from "zod";
 import { getDatabase } from "./firebase";
+import { useKitchenId } from "./useKitchenPath";
 
 const itemSchema = z.object({
   name: z.string().min(1).max(100),
-  quantity: z.number().int().min(0).max(9999),
+  quantity: z.number().min(0).max(9999),
+  stockBaseline: z.number().min(0).max(9999).optional(),
   category: z.enum(expenseCategories),
   state: z.enum(["inStock", "finished", "toBuy"]),
   bought: z.boolean().optional(),
   boughtAt: z.instanceof(Timestamp).nullable().optional(),
   receiptRecorded: z.boolean().optional(),
+  deletedAt: z.instanceof(Timestamp).optional(),
   createdAt: z.instanceof(Timestamp),
   updatedAt: z.instanceof(Timestamp)
 });
 
 export function useItems() {
+  const kitchenId = useKitchenId();
   const [data, setData] = useState<Array<{ id: string; item: KitchenItem }> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -30,7 +34,7 @@ export function useItems() {
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const snapshot = await getDocsFromServer(collection(getDatabase(), `${KITCHEN_DOC_PATH}/items`));
+      const snapshot = await getDocsFromServer(collection(getDatabase(), `${getKitchenDocPath()}/items`));
       setData(snapshot.docs.map((entry) => {
         const item = itemSchema.parse(entry.data({ serverTimestamps: "estimate" }));
         return {
@@ -49,12 +53,18 @@ export function useItems() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [kitchenId]);
 
   useEffect(() => {
+    setData(null);
+    setLoading(true);
+    if (!kitchenId) {
+      setLoading(false);
+      return undefined;
+    }
     let unsubscribe: (() => void) | undefined;
     try {
-      unsubscribe = onSnapshot(collection(getDatabase(), `${KITCHEN_DOC_PATH}/items`), (snapshot) => {
+      unsubscribe = onSnapshot(collection(getDatabase(), `${getKitchenDocPath()}/items`), (snapshot) => {
         try {
           setData(snapshot.docs.map((entry) => {
             const item = itemSchema.parse(entry.data({ serverTimestamps: "estimate" }));
@@ -85,7 +95,7 @@ export function useItems() {
       setLoading(false);
     }
     return () => unsubscribe?.();
-  }, []);
+  }, [kitchenId]);
 
   return { data, error, loading, refresh };
 }

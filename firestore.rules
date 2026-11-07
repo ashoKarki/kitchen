@@ -1,39 +1,95 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /kitchen/main {
-      allow read: if isKitchenOwner();
-      allow create, update: if isKitchenOwner() && validSettings(request.resource.data);
+    match /userAccounts/{uid} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow create: if request.auth != null
+        && request.auth.uid == uid
+        && request.auth.token.email is string
+        && request.auth.token.email_verified == true
+        && request.resource.data.keys().hasOnly(['householdId', 'homeHouseholdId'])
+        && request.resource.data.householdId == uid
+        && request.resource.data.homeHouseholdId == uid
+        && existsAfter(/databases/$(database)/documents/kitchen/$(uid))
+        && getAfter(/databases/$(database)/documents/kitchen/$(uid)).data.ownerUid == uid
+        && getAfter(/databases/$(database)/documents/kitchen/$(uid)).data.members[uid] == 'owner';
+      allow update, delete: if false;
+    }
+
+    match /kitchen/{householdId} {
+      allow read: if isMember(householdId) || isInitializingPersonalHousehold(householdId);
+      allow create: if canCreatePersonalHousehold(householdId);
+      allow update: if isMember(householdId)
+        && validSettings(request.resource.data)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'reminderEnabled',
+          'reminderHour',
+          'timeZone',
+          'budgetAlertsEnabled',
+          'discretionaryCategories',
+          'memberProfiles'
+        ])
+        && validOwnMemberProfileUpdate();
       allow delete: if false;
 
       match /items/{itemId} {
-        allow read: if isKitchenOwner();
-        allow create, update: if isKitchenOwner() && validItem(request.resource.data);
-        allow delete: if isKitchenOwner();
+        allow read: if isMember(householdId);
+        allow create: if isMember(householdId) && validItem(request.resource.data)
+          && !request.resource.data.keys().hasAny(['deletedAt']);
+        allow update: if isMember(householdId) && validItem(request.resource.data)
+          && (
+            (!resource.data.keys().hasAny(['deletedAt'])
+              && (!request.resource.data.keys().hasAny(['deletedAt'])
+                || (request.resource.data.deletedAt == request.time
+                  && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['deletedAt', 'updatedAt']))))
+            || (resource.data.keys().hasAny(['deletedAt'])
+              && request.time < resource.data.deletedAt + duration.value(60, 's')
+              && !request.resource.data.keys().hasAny(['deletedAt'])
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['deletedAt', 'updatedAt']))
+          );
+        allow delete: if false;
       }
 
       match /devices/{deviceId} {
-        allow read: if isKitchenOwner();
-        allow create, update: if isKitchenOwner()
-          && request.resource.data.keys().hasOnly(['platform', 'updatedAt'])
+        allow read: if isMember(householdId);
+        allow create: if isMember(householdId)
+          && request.resource.data.keys().hasOnly(['platform', 'updatedAt', 'uid'])
           && request.resource.data.keys().hasAll(['platform', 'updatedAt'])
           && request.resource.data.platform in ['ios', 'android']
+          && request.resource.data.uid == request.auth.uid
           && request.resource.data.updatedAt is timestamp;
-        allow delete: if isKitchenOwner();
+        allow update: if isMember(householdId)
+          && request.resource.data.keys().hasOnly(['platform', 'updatedAt', 'uid'])
+          && request.resource.data.keys().hasAll(['platform', 'updatedAt'])
+          && request.resource.data.platform in ['ios', 'android']
+          && (
+            request.resource.data.uid == request.auth.uid
+            || (
+              isKitchenOwner(householdId)
+              && !resource.data.keys().hasAny(['uid'])
+              && !request.resource.data.keys().hasAny(['uid'])
+            )
+          )
+          && request.resource.data.updatedAt is timestamp;
+        allow delete: if isMember(householdId)
+          && (
+            resource.data.uid == request.auth.uid
+            || (isKitchenOwner(householdId) && !resource.data.keys().hasAny(['uid']))
+          );
       }
 
       match /receipts/{receiptId} {
-        allow read: if isKitchenOwner();
-        allow create, update: if isKitchenOwner() && validReceipt(request.resource.data);
-        allow delete: if isKitchenOwner();
+        allow read: if isMember(householdId);
+        allow create, update: if isMember(householdId) && validReceipt(request.resource.data);
+        allow delete: if isMember(householdId);
       }
 
       match /budgets/{budgetId} {
-        allow read: if isKitchenOwner();
-        allow create: if isKitchenOwner()
+        allow read: if isMember(householdId);
+        allow create: if isMember(householdId)
           && validBudget(request.resource.data)
           && !request.resource.data.keys().hasAny(['alertState']);
-        allow update: if isKitchenOwner()
+        allow update: if isMember(householdId)
           && validBudget(request.resource.data)
           && (
             (!request.resource.data.keys().hasAny(['alertState'])
@@ -44,26 +100,34 @@ service cloud.firestore {
               && request.resource.data.alertState == resource.data.alertState
             )
           );
-        allow delete: if isKitchenOwner();
+        allow delete: if isMember(householdId);
       }
 
       match /alerts/{alertId} {
-        allow read: if isKitchenOwner();
+        allow read: if isMember(householdId);
         allow create: if false;
-        allow update: if isKitchenOwner()
+        allow update: if isMember(householdId)
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read'])
           && request.resource.data.read is bool;
-        allow delete: if isKitchenOwner();
+        allow delete: if isMember(householdId);
       }
 
       match /insights/{insightId} {
-        allow read: if isKitchenOwner();
+        allow read: if isMember(householdId);
         allow write: if false;
       }
 
       match /usage/{usageId} {
-        allow read: if isKitchenOwner();
+        allow read: if isMember(householdId);
         allow write: if false;
+      }
+
+      match /memberSettings/{uid} {
+        allow read: if isMember(householdId) && request.auth.uid == uid;
+        allow create, update: if isMember(householdId)
+          && request.auth.uid == uid
+          && validMemberSettings(request.resource.data);
+        allow delete: if false;
       }
 
       match /{document=**} {
@@ -75,10 +139,53 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
-    function isKitchenOwner() {
+    function isMember(householdId) {
+      return (
+          request.auth != null
+          && request.auth.token.email is string
+          && request.auth.token.email_verified == true
+          && exists(/databases/$(database)/documents/userAccounts/$(request.auth.uid))
+          && get(/databases/$(database)/documents/userAccounts/$(request.auth.uid)).data.householdId == householdId
+          && exists(/databases/$(database)/documents/kitchen/$(householdId))
+          && get(/databases/$(database)/documents/kitchen/$(householdId)).data.members is map
+          && request.auth.uid in get(/databases/$(database)/documents/kitchen/$(householdId)).data.members.keys()
+          && get(/databases/$(database)/documents/kitchen/$(householdId)).data.members[request.auth.uid] in ['owner', 'member']
+        );
+    }
+
+    function isInitializingPersonalHousehold(householdId) {
       return request.auth != null
-        && request.auth.token.email == 'karkiashok5@gmail.com'
-        && request.auth.token.email_verified == true;
+        && request.auth.uid == householdId
+        && request.auth.token.email is string
+        && request.auth.token.email_verified == true
+        && !exists(/databases/$(database)/documents/userAccounts/$(request.auth.uid));
+    }
+
+    function canCreatePersonalHousehold(householdId) {
+      return request.auth != null
+        && request.auth.uid == householdId
+        && request.auth.token.email is string
+        && request.auth.token.email_verified == true
+        && validSettings(request.resource.data)
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.members is map
+        && request.resource.data.members.keys().hasOnly([request.auth.uid])
+        && request.resource.data.members[request.auth.uid] == 'owner'
+        && request.resource.data.memberProfiles is map
+        && request.resource.data.memberProfiles.keys().hasOnly([request.auth.uid])
+        && existsAfter(/databases/$(database)/documents/userAccounts/$(request.auth.uid))
+        && getAfter(/databases/$(database)/documents/userAccounts/$(request.auth.uid)).data.householdId == householdId
+        && getAfter(/databases/$(database)/documents/userAccounts/$(request.auth.uid)).data.homeHouseholdId == householdId;
+    }
+
+    function isKitchenOwner(householdId) {
+      return request.auth != null
+        && request.auth.token.email_verified == true
+        && exists(/databases/$(database)/documents/userAccounts/$(request.auth.uid))
+        && get(/databases/$(database)/documents/userAccounts/$(request.auth.uid)).data.householdId == householdId
+        && exists(/databases/$(database)/documents/kitchen/$(householdId))
+        && get(/databases/$(database)/documents/kitchen/$(householdId)).data.members is map
+        && get(/databases/$(database)/documents/kitchen/$(householdId)).data.members[request.auth.uid] == 'owner';
     }
 
     function validSettings(data) {
@@ -87,7 +194,10 @@ service cloud.firestore {
           'reminderHour',
           'timeZone',
           'budgetAlertsEnabled',
-          'discretionaryCategories'
+          'discretionaryCategories',
+          'ownerUid',
+          'members',
+          'memberProfiles'
         ])
         && data.reminderEnabled is bool
         && data.reminderHour is int
@@ -95,21 +205,78 @@ service cloud.firestore {
         && data.reminderHour <= 23
         && data.timeZone is string
         && data.budgetAlertsEnabled is bool
-        && data.discretionaryCategories is list;
+        && data.discretionaryCategories is list
+        && (!data.keys().hasAny(['ownerUid']) || data.ownerUid is string)
+        && (!data.keys().hasAny(['members']) || data.members is map)
+        && (!data.keys().hasAny(['memberProfiles']) || data.memberProfiles is map);
+    }
+
+    function validOwnMemberProfileUpdate() {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(['memberProfiles'])
+        || (
+          request.resource.data.memberProfiles is map
+          && resource.data.memberProfiles is map
+          && request.resource.data.memberProfiles.diff(resource.data.memberProfiles)
+            .affectedKeys().hasOnly([request.auth.uid])
+          && request.resource.data.memberProfiles[request.auth.uid] is map
+          && request.resource.data.memberProfiles[request.auth.uid].keys().hasOnly(['displayName', 'photoURL'])
+          && request.resource.data.memberProfiles[request.auth.uid].displayName is string
+          && request.resource.data.memberProfiles[request.auth.uid].photoURL is string
+        );
+    }
+
+    function validMemberSettings(data) {
+      return data.keys().hasOnly([
+          'reminderEnabled',
+          'reminderHour',
+          'expiryWarnDays',
+          'budgetAlertsEnabled',
+          'weeklySummaryEnabled',
+          'language',
+          'theme',
+          'diet',
+          'dislikes',
+          'servings',
+          'maxCookingTimeMinutes',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.reminderEnabled is bool
+        && data.reminderHour is int
+        && data.reminderHour >= 0
+        && data.reminderHour <= 23
+        && data.expiryWarnDays is int
+        && data.expiryWarnDays >= 0
+        && data.expiryWarnDays <= 30
+        && data.budgetAlertsEnabled is bool
+        && data.weeklySummaryEnabled is bool
+        && data.language is string
+        && data.theme in ['system', 'light', 'dark']
+        && data.diet is list
+        && data.dislikes is list
+        && data.servings is int
+        && data.servings >= 1
+        && data.servings <= 20
+        && data.maxCookingTimeMinutes is int
+        && data.maxCookingTimeMinutes >= 1
+        && data.maxCookingTimeMinutes <= 600;
     }
 
     function validItem(data) {
       return data.name is string
         && data.name.size() > 0
         && data.name.size() <= 100
-        && data.quantity is int
+        && data.quantity is number
         && data.quantity >= 0
         && data.quantity <= 9999
+        && (!data.keys().hasAny(['stockBaseline']) || (data.stockBaseline is number
+          && data.stockBaseline >= 0 && data.stockBaseline <= 9999))
         && data.category is string
         && data.state in ['inStock', 'finished', 'toBuy']
         && (!data.keys().hasAny(['bought']) || data.bought is bool)
         && (!data.keys().hasAny(['boughtAt']) || data.boughtAt == null || data.boughtAt is timestamp)
-        && (!data.keys().hasAny(['receiptRecorded']) || data.receiptRecorded is bool);
+        && (!data.keys().hasAny(['receiptRecorded']) || data.receiptRecorded is bool)
+        && (!data.keys().hasAny(['deletedAt']) || data.deletedAt is timestamp);
     }
 
     function validReceipt(data) {

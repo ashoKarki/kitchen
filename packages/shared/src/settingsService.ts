@@ -2,14 +2,18 @@ import {
   doc,
   getDoc,
   setDoc,
-  updateDoc,
+  writeBatch,
   type Firestore
 } from "firebase/firestore";
-import { DEFAULT_SETTINGS, KITCHEN_DOC_PATH } from "./constants.js";
+import { DEFAULT_SETTINGS, getKitchenDocPath } from "./constants.js";
 import type { KitchenSettings } from "./types.js";
 
 export function settingsDocument(db: Firestore) {
-  return doc(db, KITCHEN_DOC_PATH);
+  return doc(db, getKitchenDocPath());
+}
+
+export function memberSettingsDocument(db: Firestore, uid: string) {
+  return doc(db, `${getKitchenDocPath()}/memberSettings/${uid}`);
 }
 
 export async function ensureSettings(db: Firestore, timeZone: string): Promise<void> {
@@ -41,9 +45,28 @@ export async function ensureSettings(db: Firestore, timeZone: string): Promise<v
 
 export async function updateSettings(
   db: Firestore,
-  changes: Partial<KitchenSettings>
+  changes: Partial<KitchenSettings>,
+  memberUid?: string
 ): Promise<void> {
-  await updateDoc(settingsDocument(db), {
-    ...changes
-  });
+  const memberChanges: Partial<Pick<KitchenSettings, "reminderEnabled" | "reminderHour" | "budgetAlertsEnabled">> = {};
+  const sharedChanges: Partial<KitchenSettings> = {};
+  for (const [key, value] of Object.entries(changes)) {
+    if (key === "reminderEnabled" || key === "reminderHour" || key === "budgetAlertsEnabled") {
+      Object.assign(memberChanges, { [key]: value });
+    } else if (key === "timeZone" || key === "discretionaryCategories") {
+      Object.assign(sharedChanges, { [key]: value });
+    }
+  }
+
+  const batch = writeBatch(db);
+  if (Object.keys(memberChanges).length > 0) {
+    if (!memberUid) throw new Error("A signed-in household member is required to update personal settings.");
+    batch.update(memberSettingsDocument(db, memberUid), memberChanges);
+  }
+  if (Object.keys(sharedChanges).length > 0) {
+    batch.update(settingsDocument(db), sharedChanges);
+  }
+  if (Object.keys(memberChanges).length > 0 || Object.keys(sharedChanges).length > 0) {
+    await batch.commit();
+  }
 }

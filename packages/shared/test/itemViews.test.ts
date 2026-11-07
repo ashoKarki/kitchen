@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest";
 import { Timestamp } from "firebase/firestore";
 import {
   isUnreceiptedPurchase,
+  filterItemsByName,
   itemsForPurchaseCompletion,
   itemsForView,
+  recentlyDeletedItems,
+  stockWarning,
   unreceiptedPurchaseItems
 } from "../src/itemViews.js";
 import type { KitchenItem } from "../src/types.js";
@@ -27,6 +30,44 @@ describe("itemsForView", () => {
     expect(itemsForView(items, "pantry").map(({ id }) => id)).toEqual(["stock", "finished"]);
   });
 
+  describe("filterItemsByName", () => {
+    it("searches visible items case-insensitively and ignores surrounding whitespace", () => {
+      const items = [
+        { id: "milk", item: { ...item("toBuy"), name: "Oat Milk" } },
+        { id: "tea", item: { ...item("toBuy"), name: "Tea" } }
+      ];
+      expect(filterItemsByName(items, "  MILK  ").map(({ id }) => id)).toEqual(["milk"]);
+      expect(filterItemsByName(items, "  ").map(({ id }) => id)).toEqual(["milk", "tea"]);
+      expect(filterItemsByName(items, "coffee")).toEqual([]);
+    });
+
+    it("searches pantry items without including shopping-only items", () => {
+      const items = [
+        { id: "milk", item: { ...item("inStock"), name: "Oat Milk" } },
+        { id: "finished", item: { ...item("finished"), name: "Milk powder" } },
+        { id: "buy", item: { ...item("toBuy"), name: "Milk" } }
+      ];
+      const pantry = itemsForView(items, "pantry");
+      expect(filterItemsByName(pantry, " MILK ").map(({ id }) => id)).toEqual(["milk", "finished"]);
+      expect(filterItemsByName(pantry, "tea")).toEqual([]);
+      expect(filterItemsByName(pantry, "").map(({ id }) => id)).toEqual(["milk", "finished"]);
+    });
+  });
+
+  describe("stockWarning", () => {
+    it("uses strict 30% and 50% boundaries", () => {
+      expect(stockWarning({ quantity: 2, stockBaseline: 10 })).toBe("critical");
+      expect(stockWarning({ quantity: 3, stockBaseline: 10 })).toBe("low");
+      expect(stockWarning({ quantity: 4, stockBaseline: 10 })).toBe("low");
+      expect(stockWarning({ quantity: 5, stockBaseline: 10 })).toBeNull();
+      expect(stockWarning({ quantity: 0, stockBaseline: 10 })).toBe("critical");
+      expect(stockWarning({ quantity: 5 })).toBeNull();
+      expect(stockWarning({ quantity: 0 })).toBe("critical");
+      expect(stockWarning({ quantity: 0.09, stockBaseline: 0.3 })).toBe("low");
+      expect(stockWarning({ quantity: 0.15, stockBaseline: 0.3 })).toBeNull();
+      expect(stockWarning({ quantity: 0.089999999, stockBaseline: 0.3 })).toBe("critical");
+    });
+  });
   it("shows finished and to-buy items on the shopping list", () => {
     const items = [
       { id: "finished", item: item("finished") },
@@ -55,6 +96,20 @@ describe("itemsForView", () => {
       { id: "recorded", item: { ...justPurchased, receiptRecorded: true } }
     ];
     expect(itemsForView(items, "shopping", now).map(({ id }) => id)).toEqual(["recent"]);
+  });
+
+  it("excludes deleted items from both views and pending receipts", () => {
+    const deleted = { ...item("inStock"), bought: true, deletedAt: Timestamp.fromMillis(10_000) };
+    const entries = [{ id: "deleted", item: deleted }];
+    expect(itemsForView(entries, "pantry")).toEqual([]);
+    expect(itemsForView(entries, "shopping")).toEqual([]);
+    expect(unreceiptedPurchaseItems(entries, 11_000)).toEqual([]);
+  });
+
+  it("allows undo only before the one-minute deadline", () => {
+    const entries = [{ id: "deleted", item: { ...item("toBuy"), deletedAt: Timestamp.fromMillis(10_000) } }];
+    expect(recentlyDeletedItems(entries, 69_999)).toHaveLength(1);
+    expect(recentlyDeletedItems(entries, 70_000)).toHaveLength(0);
   });
 });
 

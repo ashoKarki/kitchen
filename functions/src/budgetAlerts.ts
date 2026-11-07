@@ -1,5 +1,6 @@
 import { getFirestore, Timestamp, type DocumentData, type Firestore } from "firebase-admin/firestore";
 import { onDocumentCreated, onDocumentWritten } from "firebase-functions/v2/firestore";
+import { onCall } from "firebase-functions/v2/https";
 import { z } from "zod";
 import {
   getBudgetPeriodBounds,
@@ -10,6 +11,7 @@ import { expenseCategories } from "../../packages/shared/src/types.js";
 import type { BudgetAlert } from "../../packages/shared/src/types.js";
 import { sendExpoPush } from "./expoPush.js";
 import { decideBudgetAlerts, type BudgetAlertState } from "./budgetAlertLogic.js";
+import { requireMember } from "./auth.js";
 
 const settingsSchema = z.object({
   timeZone: z.string().min(1),
@@ -28,7 +30,7 @@ const budgetSchema = z.object({
   active: z.boolean(),
   alertState: z.object({
     periodKey: z.string(),
-    sentThresholds: z.array(z.union([z.literal(80), z.literal(100)]))
+    sentThresholds: z.array(z.number().int().min(70))
   }).optional()
 });
 const receiptSchema = z.object({
@@ -50,6 +52,32 @@ function readSettings(value: unknown): Settings {
   return result.data;
 }
 
+function memberAlertPreference(value: unknown, fallback: boolean): boolean {
+  if (
+    typeof value === "object"
+    && value !== null
+    && "budgetAlertsEnabled" in value
+    && typeof value.budgetAlertsEnabled === "boolean"
+  ) {
+    return value.budgetAlertsEnabled;
+  }
+  return fallback;
+}
+
+async function anyMemberHasBudgetAlerts(db: Firestore, householdId: string, fallback: boolean): Promise<boolean> {
+  const kitchen = await db.doc(`kitchen/${householdId}`).get();
+  const members: unknown = kitchen.get("members");
+  if (typeof members !== "object" || members === null || Array.isArray(members)) return fallback;
+  const uids = Object.entries(members)
+    .filter(([, role]) => role === "owner" || role === "member")
+    .map(([uid]) => uid);
+  if (uids.length === 0) return fallback;
+  const settings = await Promise.all(uids.map((uid) => (
+    db.doc(`kitchen/${householdId}/memberSettings/${uid}`).get()
+  )));
+  return settings.some((snapshot) => memberAlertPreference(snapshot.data(), fallback));
+}
+
 function shouldReevaluateBudget(before: DocumentData | undefined, after: DocumentData | undefined): boolean {
   if (!after) return false;
   if (!before) return true;
@@ -64,48 +92,34 @@ function shouldReevaluateSettings(before: DocumentData | undefined, after: Docum
     .some((key) => JSON.stringify(before[key]) !== JSON.stringify(after[key]));
 }
 
-async function evaluateBudget(db: Firestore, budgetId: string, settings: Settings): Promise<void> {
-  if (!settings.budgetAlertsEnabled) return;
-  const budgetRef = db.doc(`kitchen/main/budgets/${budgetId}`);
-  const budgetSnapshot = await budgetRef.get();
-  if (!budgetSnapshot.exists) return;
-  const parsedBudget = budgetSchema.safeParse(budgetSnapshot.data());
-  if (!parsedBudget.success) {
-    throw new Error(`Budget ${budgetId} is invalid: ${parsedBudget.error.message}`);
-  }
-  const budget = parsedBudget.data;
-  if (!budget.active) return;
-
-  const bounds = getBudgetPeriodBounds(new Date(), budget.period, settings.timeZone);
-  const startDateKey = getDateKeyInTimeZone(bounds.start, settings.timeZone);
-  const endDateKey = getDateKeyInTimeZone(bounds.endExclusive, settings.timeZone);
-  const receiptSnapshot = await db.collection("kitchen/main/receipts")
-    .where("purchaseDateKey", ">=", startDateKey)
-    .where("purchaseDateKey", "<", endDateKey)
-    .get();
-  const periodReceipts = receiptSnapshot.docs.map((entry) => {
-    const parsed = receiptSchema.safeParse(entry.data());
-    if (!parsed.success) throw new Error(`Receipt ${entry.id} is invalid: ${parsed.error.message}`);
-    return parsed.data;
-  });
-  const spentCents = getBudgetSpendCents(
-    periodReceipts,
-    budget.scope,
-    settings.discretionaryCategories
-  );
+export async function evaluateBudget(db: Firestore, householdId: string, budgetId: string, settings: Settings): Promise<void> {
+  if (!await anyMemberHasBudgetAlerts(db, householdId, settings.budgetAlertsEnabled)) return;
+  const budgetRef = db.doc(`kitchen/${householdId}/budgets/${budgetId}`);
   await db.runTransaction(async (transaction) => {
     const latest = await transaction.get(budgetRef);
     if (!latest.exists) return;
     const latestBudget = budgetSchema.safeParse(latest.data());
     if (!latestBudget.success) throw new Error(`Budget ${budgetId} is invalid: ${latestBudget.error.message}`);
-    if (!latestBudget.data.active || !settings.budgetAlertsEnabled) return;
+    if (!latestBudget.data.active) return;
+    const bounds = getBudgetPeriodBounds(new Date(), latestBudget.data.period, settings.timeZone);
+    const startDateKey = getDateKeyInTimeZone(bounds.start, settings.timeZone);
+    const endDateKey = getDateKeyInTimeZone(bounds.endExclusive, settings.timeZone);
+    const receipts = await transaction.get(db.collection(`kitchen/${householdId}/receipts`)
+      .where("purchaseDateKey", ">=", startDateKey)
+      .where("purchaseDateKey", "<", endDateKey));
+    const periodReceipts = receipts.docs.map((entry) => {
+      const parsed = receiptSchema.safeParse(entry.data());
+      if (!parsed.success) throw new Error(`Receipt ${entry.id} is invalid: ${parsed.error.message}`);
+      return parsed.data;
+    });
+    const spentCents = getBudgetSpendCents(periodReceipts, latestBudget.data.scope, settings.discretionaryCategories);
     const previousState = latestBudget.data.alertState as BudgetAlertState | undefined;
     const decision = decideBudgetAlerts(previousState, bounds.key, spentCents, latestBudget.data.amountCents);
     if (decision.thresholds.length === 0) return;
     transaction.update(budgetRef, { alertState: decision.state });
     for (const thresholdPercent of decision.thresholds) {
       const id = `${budgetId}_${bounds.key}_${thresholdPercent}`;
-      const alertRef = db.doc(`kitchen/main/alerts/${id}`);
+      const alertRef = db.doc(`kitchen/${householdId}/alerts/${id}`);
       const alert: Omit<BudgetAlert, "createdAt"> = {
         budgetId,
         budgetName: latestBudget.data.name,
@@ -121,62 +135,101 @@ async function evaluateBudget(db: Firestore, budgetId: string, settings: Setting
   });
 }
 
-async function evaluateAllBudgets(db: Firestore, settings: Settings): Promise<void> {
-  if (!settings.budgetAlertsEnabled) return;
-  const budgets = await db.collection("kitchen/main/budgets").get();
-  await Promise.all(budgets.docs.map((budget) => evaluateBudget(db, budget.id, settings)));
+async function evaluateAllBudgets(db: Firestore, householdId: string, settings: Settings): Promise<void> {
+  if (!await anyMemberHasBudgetAlerts(db, householdId, settings.budgetAlertsEnabled)) return;
+  const budgets = await db.collection(`kitchen/${householdId}/budgets`).get();
+  await Promise.all(budgets.docs.map((budget) => evaluateBudget(db, householdId, budget.id, settings)));
 }
 
 export const evaluateBudgetAfterReceiptChange = onDocumentWritten(
-  { document: "kitchen/main/receipts/{receiptId}", retry: true },
-  async () => {
+  { document: "kitchen/{householdId}/receipts/{receiptId}", retry: true },
+  async (event) => {
     const db = getFirestore();
-    const settings = readSettings((await db.doc("kitchen/main").get()).data());
-    await evaluateAllBudgets(db, settings);
+    const householdId = event.params.householdId;
+    const settings = readSettings((await db.doc(`kitchen/${householdId}`).get()).data());
+    await evaluateAllBudgets(db, householdId, settings);
   }
 );
 
 export const evaluateBudgetAfterBudgetChange = onDocumentWritten(
-  { document: "kitchen/main/budgets/{budgetId}", retry: true },
+  { document: "kitchen/{householdId}/budgets/{budgetId}", retry: true },
   async (event) => {
     if (!shouldReevaluateBudget(event.data?.before.data(), event.data?.after.data())) return;
     const db = getFirestore();
-    const settings = readSettings((await db.doc("kitchen/main").get()).data());
-    if (!settings.budgetAlertsEnabled) return;
-    await evaluateBudget(db, event.params.budgetId, settings);
+    const householdId = event.params.householdId;
+    const settings = readSettings((await db.doc(`kitchen/${householdId}`).get()).data());
+    await evaluateBudget(db, householdId, event.params.budgetId, settings);
   }
 );
 
 export const evaluateBudgetAfterSettingsChange = onDocumentWritten(
-  { document: "kitchen/main", retry: true },
+  { document: "kitchen/{householdId}", retry: true },
   async (event) => {
     if (!shouldReevaluateSettings(event.data?.before.data(), event.data?.after.data())) return;
     const db = getFirestore();
     const settings = readSettings(event.data?.after.data());
-    await evaluateAllBudgets(db, settings);
+    await evaluateAllBudgets(db, event.params.householdId, settings);
+  }
+);
+
+export const evaluateBudgetAfterMemberSettingsChange = onDocumentWritten(
+  { document: "kitchen/{householdId}/memberSettings/{uid}", retry: true },
+  async (event) => {
+    if (JSON.stringify(event.data?.before.get("budgetAlertsEnabled")) === JSON.stringify(event.data?.after.get("budgetAlertsEnabled"))) {
+      return;
+    }
+    const db = getFirestore();
+    const householdId = event.params.householdId;
+    const settings = readSettings((await db.doc(`kitchen/${householdId}`).get()).data());
+    await evaluateAllBudgets(db, householdId, settings);
   }
 );
 
 export const sendBudgetAlertPush = onDocumentCreated(
-  { document: "kitchen/main/alerts/{alertId}", retry: true, timeoutSeconds: 300, maxInstances: 2 },
+  { document: "kitchen/{householdId}/alerts/{alertId}", retry: true, timeoutSeconds: 300, maxInstances: 2 },
   async (event) => {
     const db = getFirestore();
-    const settings = readSettings((await db.doc("kitchen/main").get()).data());
-    if (!settings.budgetAlertsEnabled) return;
+    const householdId = event.params.householdId;
+    const settings = readSettings((await db.doc(`kitchen/${householdId}`).get()).data());
     const alert = z.object({
       budgetName: z.string().min(1),
-      thresholdPercent: z.union([z.literal(80), z.literal(100)]),
+      thresholdPercent: z.number().int().min(70),
       spentCents: z.number().int(),
       amountCents: z.number().int()
     }).parse(event.data?.data());
-    const devices = await db.collection("kitchen/main/devices").get();
-    const tokens = devices.docs.map((device) => device.id);
+    const devices = await db.collection(`kitchen/${householdId}/devices`).get();
+    const preferences = new Map<string, boolean>();
+    const tokens: string[] = [];
+    for (const device of devices.docs) {
+      const uid: unknown = device.get("uid");
+      if (typeof uid !== "string") {
+        if (settings.budgetAlertsEnabled) tokens.push(device.id);
+        continue;
+      }
+      let enabled = preferences.get(uid);
+      if (enabled === undefined) {
+        const memberSettings = await db.doc(`kitchen/${householdId}/memberSettings/${uid}`).get();
+        enabled = memberAlertPreference(memberSettings.data(), settings.budgetAlertsEnabled);
+        preferences.set(uid, enabled);
+      }
+      if (enabled) tokens.push(device.id);
+    }
     if (tokens.length === 0) return;
     await sendExpoPush(
+      householdId,
       tokens,
       `${alert.budgetName}: ${alert.thresholdPercent}% budget reached`,
       `${(alert.spentCents / 100).toFixed(2)} € of ${(alert.amountCents / 100).toFixed(2)} €`,
       "expenses"
     );
+
   }
 );
+
+export const refreshBudgetAlerts = onCall(async (request) => {
+  const { householdId } = await requireMember(request);
+  const db = getFirestore();
+  const settings = readSettings((await db.doc(`kitchen/${householdId}`).get()).data());
+  await evaluateAllBudgets(db, householdId, settings);
+  return { refreshed: true };
+});

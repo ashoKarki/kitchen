@@ -4,16 +4,15 @@ import { defineSecret, defineString } from "firebase-functions/params";
 import { HttpsError, onCall } from "firebase-functions/v2/https";
 import { z } from "zod";
 import { expenseCategories } from "../../packages/shared/src/types.js";
-import { requireKitchenOwner } from "./auth.js";
+import { requireMember } from "./auth.js";
+import { enforceAppCheck } from "./household.js";
 import { parseInsightResponse } from "./insightSchema.js";
 
-const appKeySecret = defineSecret("APP_KEY");
 const anthropicApiKey = defineSecret("ANTHROPIC_API_KEY");
 const anthropicModel = defineString("ANTHROPIC_MODEL", { default: "claude-sonnet-5-5" });
 const DAILY_INSIGHT_LIMIT = 10;
 
 const inputSchema = z.object({
-  appKey: z.string().min(1).max(256),
   context: z.object({
     currentPeriod: z.object({
       label: z.string().min(1).max(40),
@@ -56,9 +55,9 @@ function providerErrorMessage(error: APIError): string {
   return error.message;
 }
 
-async function consumeDailyInsight(): Promise<void> {
+async function consumeDailyInsight(householdId: string): Promise<void> {
   const dateKey = new Date().toISOString().slice(0, 10);
-  const reference = getFirestore().doc(`kitchen/main/usage/insights-${dateKey}`);
+  const reference = getFirestore().doc(`kitchen/${householdId}/usage/insights-${dateKey}`);
   await getFirestore().runTransaction(async (transaction) => {
     const snapshot = await transaction.get(reference);
     const rawCount: unknown = snapshot.get("requests");
@@ -73,23 +72,21 @@ async function consumeDailyInsight(): Promise<void> {
 export const generateInsights = onCall(
   {
     invoker: "public",
-    secrets: [appKeySecret, anthropicApiKey],
+    enforceAppCheck: enforceAppCheck.value(),
+    secrets: [anthropicApiKey],
     timeoutSeconds: 60,
     maxInstances: 2,
     memory: "512MiB"
   },
   async (request) => {
-    requireKitchenOwner(request);
+    const member = await requireMember(request);
     const parsedInput = inputSchema.safeParse(request.data);
     if (!parsedInput.success) {
       throw new HttpsError("invalid-argument", `Invalid insight data: ${parsedInput.error.message}`);
     }
-    if (parsedInput.data.appKey !== appKeySecret.value()) {
-      throw new HttpsError("permission-denied", "The app key is invalid.");
-    }
     const apiKey = anthropicApiKey.value();
     if (!apiKey) throw new HttpsError("failed-precondition", "AI insights are not configured.");
-    await consumeDailyInsight();
+    await consumeDailyInsight(member.householdId);
 
     try {
       const client = new Anthropic({ apiKey, timeout: 50_000, maxRetries: 1 });
@@ -110,7 +107,7 @@ export const generateInsights = onCall(
         if (result.success) return result.data;
         correction = result.error.slice(0, 1000);
       }
-      console.error("AI insights response validation failed", { error: correction });
+      console.error("AI insights response validation failed");
       throw new HttpsError(
         "internal",
         `The AI insights response was invalid after retry: ${correction ?? "No response was returned."}`
@@ -121,8 +118,7 @@ export const generateInsights = onCall(
         console.error("AI insights provider error", {
           name: error.name,
           status: error.status,
-          requestID: error.requestID,
-          message: error.message
+          requestID: error.requestID
         });
         if (error.status === 401 || error.status === 403) {
           throw new HttpsError(
@@ -157,7 +153,9 @@ export const generateInsights = onCall(
           );
         }
       }
-      console.error("AI expense insights failed", error);
+      console.error("AI expense insights failed", {
+        name: error instanceof Error ? error.name : "UnknownError"
+      });
       throw new HttpsError("internal", "Could not generate AI insights. Please try again later.");
     }
   }

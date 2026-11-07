@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useState } from "react";
 import { collection, getDocsFromServer, onSnapshot, Timestamp } from "firebase/firestore";
-import { expenseCategories, KITCHEN_DOC_PATH } from "@my-kitchen/shared";
+import { expenseCategories, getKitchenDocPath } from "@my-kitchen/shared";
 import type { Receipt } from "@my-kitchen/shared";
 import { z } from "zod";
 import { getDatabase } from "./firebase";
+import { useKitchenId } from "./useKitchenPath";
 
 const lineItemSchema = z.object({
   rawName: z.string(),
   name: z.string(),
-  quantity: z.number().int(),
+  quantity: z.number(),
   amountCents: z.number().int(),
   category: z.enum(expenseCategories),
   necessity: z.enum(["essential", "discretionary", "neutral"]),
@@ -30,6 +31,7 @@ const receiptSchema = z.object({
 });
 
 export function useReceipts() {
+  const kitchenId = useKitchenId();
   const [data, setData] = useState<Array<{ id: string; receipt: Receipt }> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -37,7 +39,7 @@ export function useReceipts() {
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const snapshot = await getDocsFromServer(collection(getDatabase(), `${KITCHEN_DOC_PATH}/receipts`));
+      const snapshot = await getDocsFromServer(collection(getDatabase(), `${getKitchenDocPath()}/receipts`));
       setData(snapshot.docs.map((entry) => ({
         id: entry.id,
         receipt: receiptSchema.parse(entry.data({ serverTimestamps: "estimate" }))
@@ -48,12 +50,18 @@ export function useReceipts() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [kitchenId]);
 
   useEffect(() => {
+    setData(null);
+    setLoading(true);
+    if (!kitchenId) {
+      setLoading(false);
+      return undefined;
+    }
     let unsubscribe: (() => void) | undefined;
     try {
-      unsubscribe = onSnapshot(collection(getDatabase(), `${KITCHEN_DOC_PATH}/receipts`), (snapshot) => {
+      unsubscribe = onSnapshot(collection(getDatabase(), `${getKitchenDocPath()}/receipts`), (snapshot) => {
         try {
           setData(snapshot.docs.map((entry) => ({
             id: entry.id,
@@ -76,7 +84,7 @@ export function useReceipts() {
       setLoading(false);
     }
     return () => unsubscribe?.();
-  }, []);
+  }, [kitchenId]);
 
   return { data, error, loading, refresh };
 }

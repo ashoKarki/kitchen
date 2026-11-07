@@ -11,7 +11,6 @@ import { useBudgets } from "./useBudgetData";
 import { useToast } from "./toast";
 
 interface GenerateInsightsRequest {
-  appKey: string;
   context: AiInsightContext;
 }
 
@@ -40,15 +39,7 @@ export default function InsightsPage() {
   ), [budgets.data, receipts.data, settings.data?.discretionaryCategories, timeZone]);
   const loading = receipts.loading || budgets.loading || settings.loading;
   const loadError = receipts.error ?? budgets.error ?? settings.error;
-  const appKey = import.meta.env.VITE_APP_KEY;
-
   async function generateAiInsights() {
-    if (!appKey) {
-      const message = "AI insights are not configured. Set VITE_APP_KEY and deploy the Functions secrets.";
-      setError(message);
-      showToast(message, "error");
-      return;
-    }
     setAiBusy(true);
     setError(null);
     setNotice(null);
@@ -57,7 +48,7 @@ export default function InsightsPage() {
         getCloudFunctions(),
         "generateInsights"
       );
-      const response = await generate({ appKey, context: report.aiContext });
+      const response = await generate({ context: report.aiContext });
       setAiInsights(response.data);
       setNotice("AI insight generated from aggregate totals and categories only.");
       showToast("AI insight generated.");
@@ -99,8 +90,7 @@ export default function InsightsPage() {
 
     <section className="ai-insight-card">
       <div><p className="eyebrow">OPTIONAL AI SUMMARY</p><h2>Ask for a narrative</h2><p className="muted">Uses aggregate period totals, categories, and budget progress. Receipt images, item names, and store names are not sent.</p></div>
-      <button className="button primary" disabled={aiBusy || !appKey} onClick={() => void generateAiInsights()}>{aiBusy ? "Generating…" : "Generate AI insights"}</button>
-      {!appKey && <p className="hint">AI insights are unavailable until VITE_APP_KEY and the server-side Anthropic secret are configured.</p>}
+      <button className="button primary" disabled={aiBusy} onClick={() => void generateAiInsights()}>{aiBusy ? "Generating…" : "Generate AI insights"}</button>
       {aiInsights && <div className="ai-insight-result">
         <p>{aiInsights.summary}</p>
         {aiInsights.observations.length > 0 && <><h3>Observations</h3><ul>{aiInsights.observations.map((entry, index) => <li key={`${entry}-${index}`}>{entry}</li>)}</ul></>}

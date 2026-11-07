@@ -42,6 +42,15 @@
           "cameraPermission": "Allow My Kitchen to photograph a receipt for scanning."
         }
       ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow My Kitchen to photograph a receipt for scanning.",
+          "microphonePermission": false,
+          "recordAudioAndroid": false,
+          "barcodeScannerEnabled": false
+        }
+      ],
       "expo-web-browser"
     ],
     "experiments": {

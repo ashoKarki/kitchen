@@ -36,7 +36,7 @@ export interface Budget extends BudgetDraft {
   updatedAt: Timestamp;
   alertState?: {
     periodKey: string;
-    sentThresholds: Array<80 | 100>;
+    sentThresholds: number[];
   } | undefined;
 }
 
@@ -45,7 +45,7 @@ export interface BudgetAlert {
   budgetName: string;
   period: BudgetPeriod;
   periodKey: string;
-  thresholdPercent: 80 | 100;
+  thresholdPercent: number;
   amountCents: number;
   spentCents: number;
   read: boolean;
@@ -69,11 +69,13 @@ export interface PeriodBounds {
 export interface KitchenItem {
   name: string;
   quantity: number;
+  stockBaseline?: number | undefined;
   category: ExpenseCategory;
   state: ItemState;
   bought?: boolean;
   boughtAt?: Timestamp | null;
   receiptRecorded?: boolean;
+  deletedAt?: Timestamp | undefined;
   createdAt: Timestamp;
   updatedAt: Timestamp;
 }
@@ -83,6 +85,7 @@ export type NewKitchenItem = Pick<KitchenItem, "name" | "quantity" | "category" 
 export interface KitchenItemUpdate {
   name?: string;
   quantity?: number;
+  stockBaseline?: number;
   category?: ExpenseCategory;
   state?: ItemState;
   bought?: boolean;

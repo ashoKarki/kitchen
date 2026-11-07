@@ -5,7 +5,7 @@ import {
   getBudgetPeriodBounds,
   getBudgetSpendCents,
   getDateKeyInTimeZone,
-  getReachedBudgetThresholds
+  getHighestReachedBudgetThreshold
 } from "../src/budgetAnalytics.js";
 import type { Receipt } from "../src/types.js";
 
@@ -46,10 +46,25 @@ describe("budget analytics", () => {
     expect(budgetScopeLabel({ type: "overall" })).toBe("All spending");
   });
 
-  it("returns thresholds reached at eighty and one hundred percent", () => {
-    expect(getReachedBudgetThresholds(799, 1000)).toEqual([]);
-    expect(getReachedBudgetThresholds(800, 1000)).toEqual([80]);
-    expect(getReachedBudgetThresholds(1200, 1000)).toEqual([80, 100]);
-    expect(() => getReachedBudgetThresholds(1, 0)).toThrow(RangeError);
+  it("returns the highest threshold on the stepped alert ladder using integer cents", () => {
+    const cases: Array<[number, number | null]> = [
+      [6999, null],
+      [7000, 70],
+      [8900, 80],
+      [9000, 90],
+      [9199, 90],
+      [9200, 92],
+      [9799, 96],
+      [9800, 98],
+      [9999, 98],
+      [10000, 100],
+      [10999, 100],
+      [11000, 110],
+      [12000, 120]
+    ];
+    for (const [spent, threshold] of cases) {
+      expect(getHighestReachedBudgetThreshold(spent, 10000)).toBe(threshold);
+    }
+    expect(() => getHighestReachedBudgetThreshold(1, 0)).toThrow(RangeError);
   });
 });

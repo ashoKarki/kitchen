@@ -38,18 +38,19 @@ async function postJson(url: string, body: unknown): Promise<unknown> {
     body: JSON.stringify(body)
   });
   if (!response.ok) {
-    throw new Error(`Expo push request failed (${response.status}): ${await response.text()}`);
+    throw new Error(`Expo push request failed (${response.status}).`);
   }
   return response.json();
 }
 
-async function removeUnregisteredTokens(tokens: readonly string[]): Promise<void> {
+async function removeUnregisteredTokens(householdId: string, tokens: readonly string[]): Promise<void> {
   await Promise.all(tokens.map(async (token) => {
-    await getFirestore().doc(`kitchen/main/devices/${token}`).delete();
+    await getFirestore().doc(`kitchen/${householdId}/devices/${token}`).delete();
   }));
 }
 
 export async function sendExpoPush(
+  householdId: string,
   tokens: readonly string[],
   title: string,
   body: string,
@@ -78,11 +79,11 @@ export async function sendExpoPush(
       }
       if (token && ticket.status === "ok" && ticket.id) receiptIds.push({ id: ticket.id, token });
       if (ticket.status === "error" && ticket.details?.error !== "DeviceNotRegistered") {
-        console.error("Expo push ticket error", { token, message: ticket.message, details: ticket.details });
+        console.error("Expo push ticket error", { errorCode: ticket.details?.error ?? "unknown" });
       }
     });
 
-    if (invalidTokens.length > 0) await removeUnregisteredTokens(invalidTokens);
+    if (invalidTokens.length > 0) await removeUnregisteredTokens(householdId, invalidTokens);
     if (receiptIds.length > 0) {
       await new Promise<void>((resolve) => setTimeout(resolve, 15000));
       const receiptResponse = receiptResponseSchema.parse(await postJson(
@@ -98,10 +99,10 @@ export async function sendExpoPush(
           && receipt.details?.error === "DeviceNotRegistered"
         ) invalidReceiptTokens.push(token);
         if (receipt?.status === "error" && receipt.details?.error !== "DeviceNotRegistered") {
-          console.error("Expo push receipt error", { receiptId, message: receipt.message, details: receipt.details });
+          console.error("Expo push receipt error", { errorCode: receipt.details?.error ?? "unknown" });
         }
       });
-      if (invalidReceiptTokens.length > 0) await removeUnregisteredTokens(invalidReceiptTokens);
+      if (invalidReceiptTokens.length > 0) await removeUnregisteredTokens(householdId, invalidReceiptTokens);
     }
   }
 }
