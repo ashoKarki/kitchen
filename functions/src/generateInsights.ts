@@ -55,9 +55,9 @@ function providerErrorMessage(error: APIError): string {
   return error.message;
 }
 
-async function consumeDailyInsight(): Promise<void> {
+async function consumeDailyInsight(householdId: string): Promise<void> {
   const dateKey = new Date().toISOString().slice(0, 10);
-  const reference = getFirestore().doc(`kitchen/main/usage/insights-${dateKey}`);
+  const reference = getFirestore().doc(`kitchen/${householdId}/usage/insights-${dateKey}`);
   await getFirestore().runTransaction(async (transaction) => {
     const snapshot = await transaction.get(reference);
     const rawCount: unknown = snapshot.get("requests");
@@ -79,14 +79,14 @@ export const generateInsights = onCall(
     memory: "512MiB"
   },
   async (request) => {
-    await requireMember(request);
+    const member = await requireMember(request);
     const parsedInput = inputSchema.safeParse(request.data);
     if (!parsedInput.success) {
       throw new HttpsError("invalid-argument", `Invalid insight data: ${parsedInput.error.message}`);
     }
     const apiKey = anthropicApiKey.value();
     if (!apiKey) throw new HttpsError("failed-precondition", "AI insights are not configured.");
-    await consumeDailyInsight();
+    await consumeDailyInsight(member.householdId);
 
     try {
       const client = new Anthropic({ apiKey, timeout: 50_000, maxRetries: 1 });
@@ -107,7 +107,7 @@ export const generateInsights = onCall(
         if (result.success) return result.data;
         correction = result.error.slice(0, 1000);
       }
-      console.error("AI insights response validation failed", { error: correction });
+      console.error("AI insights response validation failed");
       throw new HttpsError(
         "internal",
         `The AI insights response was invalid after retry: ${correction ?? "No response was returned."}`
@@ -118,8 +118,7 @@ export const generateInsights = onCall(
         console.error("AI insights provider error", {
           name: error.name,
           status: error.status,
-          requestID: error.requestID,
-          message: error.message
+          requestID: error.requestID
         });
         if (error.status === 401 || error.status === 403) {
           throw new HttpsError(
@@ -154,7 +153,9 @@ export const generateInsights = onCall(
           );
         }
       }
-      console.error("AI expense insights failed", error);
+      console.error("AI expense insights failed", {
+        name: error instanceof Error ? error.name : "UnknownError"
+      });
       throw new HttpsError("internal", "Could not generate AI insights. Please try again later.");
     }
   }

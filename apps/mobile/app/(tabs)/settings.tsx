@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { Alert, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from "react-native";
-import { FirebaseError } from "firebase/app";
+import { Alert, Linking, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from "react-native";
 import { signOut } from "firebase/auth";
 import { httpsCallable } from "firebase/functions";
+import { doc, getDoc } from "firebase/firestore";
+import { getKitchenDocPath, setActiveKitchenId } from "@my-kitchen/shared";
 import RNPickerSelect from "react-native-picker-select";
 import {
   expenseCategories,
@@ -10,6 +11,7 @@ import {
   type ExpenseCategory
 } from "@my-kitchen/shared";
 import { getCloudFunctions, getDatabase, getFirebaseAuth } from "../../src/firebase";
+import { useKitchenId } from "../../src/useKitchenPath";
 import { registerForPushNotifications } from "../../src/push";
 import { usePushStatus } from "../../src/pushStatus";
 import { useToast } from "../../src/toast";
@@ -75,6 +77,7 @@ export default function SettingsScreen() {
       <Text style={styles.title}>Settings</Text>
       <Text style={styles.subtitle}>Manage reminders and how your spending is categorized.</Text>
       <HouseholdSettings />
+      <AccountSettings />
       {saveError && <Text accessibilityRole="alert" style={styles.error}>{saveError}</Text>}
       {saving && <Text accessibilityLiveRegion="polite" style={styles.hint}>Saving…</Text>}
 
@@ -180,33 +183,43 @@ interface HouseholdMemberInfo {
 
 function HouseholdSettings() {
   const { showToast } = useToast();
+  const kitchenId = useKitchenId();
   const [members, setMembers] = useState<HouseholdMemberInfo[] | null>(null);
   const [email, setEmail] = useState("");
   const [inviteCode, setInviteCode] = useState<string | null>(null);
+  const [joinCode, setJoinCode] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   async function loadMembers() {
     try {
-      const list = httpsCallable<void, { members: HouseholdMemberInfo[] }>(
-        getCloudFunctions(),
-        "listHouseholdMembers"
-      );
-      const response = await list();
-      setMembers(response.data.members);
-    } catch (caught) {
-      if (caught instanceof FirebaseError && caught.code === "functions/permission-denied") {
-        setMembers([]);
-        setError(null);
-      } else {
-        setError(caught instanceof Error ? caught.message : String(caught));
+      const snapshot = await getDoc(doc(getDatabase(), getKitchenDocPath()));
+      if (!snapshot.exists()) throw new Error("The active household could not be found.");
+      const rawMembers: unknown = snapshot.get("members");
+      const rawProfiles: unknown = snapshot.get("memberProfiles");
+      if (typeof rawMembers !== "object" || rawMembers === null || Array.isArray(rawMembers)) {
+        throw new Error("The active household has invalid membership data.");
       }
+      const members = Object.entries(rawMembers).flatMap(([uid, role]) => {
+        if (role !== "owner" && role !== "member") return [];
+        const profile = typeof rawProfiles === "object" && rawProfiles !== null
+          ? Reflect.get(rawProfiles, uid)
+          : null;
+        const displayName = typeof profile === "object" && profile !== null
+          ? Reflect.get(profile, "displayName")
+          : null;
+        return [{ uid, role, displayName: typeof displayName === "string" ? displayName : "" }];
+      });
+      setMembers(members);
+      setError(null);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
     }
   }
 
   useEffect(() => {
     void loadMembers();
-  }, []);
+  }, [kitchenId]);
 
   async function createInvite() {
     setBusy(true);
@@ -221,6 +234,28 @@ function HouseholdSettings() {
       setInviteCode(response.data.code);
       setEmail("");
       showToast("Invitation code created; it expires in 48 hours.");
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : String(caught);
+      setError(message);
+      showToast(message, "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function joinHousehold() {
+    setBusy(true);
+    setError(null);
+    try {
+      const join = httpsCallable<{ code: string }, { status: "member"; householdId: string }>(
+        getCloudFunctions(),
+        "joinHousehold"
+      );
+      const response = await join({ code: joinCode.trim() });
+      setActiveKitchenId(response.data.householdId);
+      setJoinCode("");
+      setMembers(null);
+      showToast("Joined the household. Your previous personal household is retained.");
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : String(caught);
       setError(message);
@@ -250,26 +285,43 @@ function HouseholdSettings() {
   if (members === null && !error) {
     return <View style={styles.card}><Text style={styles.muted}>Loading household settings…</Text></View>;
   }
-  if (members?.length === 0 && !error) return null;
   return (
     <View style={styles.card}>
-      <Text style={styles.sectionTitle}>Household</Text>
-      <Text style={styles.muted}>Create a single-use invitation code that expires after 48 hours.</Text>
+      <Text style={styles.sectionTitle}>Join a household</Text>
+      <Text style={styles.muted}>Enter an invitation code to switch from your personal household. Your personal data is retained.</Text>
       {error && <Text accessibilityRole="alert" style={styles.error}>{error}</Text>}
       <TextInput
-        accessibilityLabel="Email lock for invitation"
+        accessibilityLabel="Invitation code"
         autoCapitalize="none"
-        autoComplete="email"
-        keyboardType="email-address"
-        onChangeText={setEmail}
-        placeholder="Email lock (optional)"
+        autoCorrect={false}
+        onChangeText={setJoinCode}
+        placeholder="Invitation code"
         style={styles.inviteInput}
-        value={email}
+        value={joinCode}
       />
-      <Pressable accessibilityRole="button" disabled={busy} onPress={() => void createInvite()} style={styles.smallButton}>
-        <Text style={styles.smallButtonText}>{busy ? "Working…" : "Create invitation"}</Text>
+      <Pressable accessibilityRole="button" disabled={busy || !joinCode.trim()} onPress={() => void joinHousehold()} style={styles.smallButton}>
+        <Text style={styles.smallButtonText}>{busy ? "Working…" : "Join household"}</Text>
       </Pressable>
-      {inviteCode && <Text selectable style={styles.success}>Share this code with your partner; it is shown once: {inviteCode}</Text>}
+      {members && members.some((member) => member.role === "owner") && (
+        <>
+          <Text style={styles.sectionTitle}>Your household</Text>
+          <Text style={styles.muted}>Create a single-use invitation code that expires after 48 hours.</Text>
+          <TextInput
+            accessibilityLabel="Email lock for invitation"
+            autoCapitalize="none"
+            autoComplete="email"
+            keyboardType="email-address"
+            onChangeText={setEmail}
+            placeholder="Email lock (optional)"
+            style={styles.inviteInput}
+            value={email}
+          />
+          <Pressable accessibilityRole="button" disabled={busy} onPress={() => void createInvite()} style={styles.smallButton}>
+            <Text style={styles.smallButtonText}>{busy ? "Working…" : "Create invitation"}</Text>
+          </Pressable>
+          {inviteCode && <Text selectable style={styles.success}>Share this code with your partner; it is shown once: {inviteCode}</Text>}
+        </>
+      )}
       {members?.filter((member) => member.role !== "owner").map((member) => (
         <View key={member.uid} style={styles.memberRow}>
           <Text style={styles.rowText}>{member.displayName || "Kitchen member"}</Text>
@@ -301,6 +353,69 @@ function HouseholdSettings() {
   );
 }
 
+function AccountSettings() {
+  const { showToast } = useToast();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function openLegalPage(path: string) {
+    try {
+      await Linking.openURL(`https://shoppingcart.at${path}`);
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : String(caught);
+      setError(message);
+      showToast(message, "error");
+    }
+  }
+
+  async function deleteAccount() {
+    setBusy(true);
+    setError(null);
+    try {
+      const remove = httpsCallable<void, { status: "deleted" }>(getCloudFunctions(), "deleteMyAccount");
+      await remove();
+      await signOut(getFirebaseAuth());
+      showToast("Account deleted.");
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : String(caught);
+      setError(message);
+      showToast(message, "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <View style={styles.card}>
+      <Text style={styles.sectionTitle}>Account</Text>
+      <Text style={styles.muted}>Delete your account, household membership, personal settings and registered devices. Shared household records remain for other members.</Text>
+      <Text style={styles.hint}>Owners must transfer ownership before deleting their account. This does not delete the household.</Text>
+      {error && <Text accessibilityRole="alert" style={styles.error}>{error}</Text>}
+      <Pressable accessibilityRole="button" disabled={busy} onPress={() => Alert.alert(
+        "Delete your account?",
+        "You will lose access to this household. Shared household records will remain for other members.",
+        [
+          { text: "Cancel", style: "cancel" },
+          { text: "Delete account", style: "destructive", onPress: () => void deleteAccount() }
+        ]
+      )} style={[styles.smallButton, busy && styles.disabledButton]}>
+        <Text style={styles.smallButtonText}>{busy ? "Deleting…" : "Delete my account"}</Text>
+      </Pressable>
+      <View style={styles.legalLinks}>
+        <Pressable onPress={() => void openLegalPage("/privacy")}>
+          <Text style={styles.memberAction}>Privacy policy</Text>
+        </Pressable>
+        <Pressable onPress={() => void openLegalPage("/terms")}>
+          <Text style={styles.memberAction}>Terms of use</Text>
+        </Pressable>
+        <Pressable onPress={() => void openLegalPage("/account-deletion")}>
+          <Text style={styles.memberAction}>Account deletion help</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   page: { flex: 1, backgroundColor: "#f5f8f2" },
   content: { padding: 18, paddingBottom: 36 },
@@ -326,5 +441,6 @@ const styles = StyleSheet.create({
   memberRow: { minHeight: 48, borderTopColor: "#eff2ef", borderTopWidth: 1, flexDirection: "row", alignItems: "center", marginTop: 10, paddingTop: 8 },
   memberActions: { flexDirection: "row", gap: 14 },
   memberAction: { color: "#286b4f", fontSize: 12, fontWeight: "700" },
+  legalLinks: { flexDirection: "row", flexWrap: "wrap", gap: 16, marginTop: 16, paddingTop: 12, borderTopColor: "#eff2ef", borderTopWidth: 1 },
   error: { color: "#a53b32", backgroundColor: "#fff0ee", padding: 10, borderRadius: 8, marginBottom: 10 }
 });

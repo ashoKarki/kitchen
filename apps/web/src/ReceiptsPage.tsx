@@ -11,11 +11,13 @@ import {
   getExpensePeriodBounds,
   getExpensePeriodLabel,
   formatCents,
+  formatQuantity,
   isUnreceiptedPurchase,
   unreceiptedPurchaseItems,
   isValidDateKey,
   isValidTime,
   parseEuroCents,
+  parseQuantity,
   receiptsToCsv,
   shiftExpensePeriod,
   summarizeExpenses,
@@ -115,6 +117,7 @@ export default function ReceiptsPage() {
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod | "">("");
   const [lineItems, setLineItems] = useState<ReceiptLineItem[]>([]);
   const [lineAmountInputs, setLineAmountInputs] = useState<string[]>([]);
+  const [lineQuantityInputs, setLineQuantityInputs] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -220,6 +223,7 @@ export default function ReceiptsPage() {
     setTotalEuros("");
     setPaymentMethod("");
     setLineItems(initialLineItems);
+    setLineQuantityInputs(initialLineItems.map((line) => formatQuantity(line.quantity)));
     setLineAmountInputs(initialLineItems.map((line) => line.amountCents > 0 ? (line.amountCents / 100).toFixed(2) : ""));
     setError(null);
     setFieldErrors({});
@@ -282,6 +286,7 @@ export default function ReceiptsPage() {
       setTotalEuros((result.data.totalCents / 100).toFixed(2));
       setPaymentMethod(result.data.paymentMethod ?? "");
       setLineItems(result.data.lineItems);
+      setLineQuantityInputs(result.data.lineItems.map((line) => formatQuantity(line.quantity)));
       setLineAmountInputs(result.data.lineItems.map((line) => (line.amountCents / 100).toFixed(2)));
       setNotice(scannedDuplicate
         ? "This receipt appears to have already been saved. Check existing expenses before saving to avoid a duplicate."
@@ -437,6 +442,7 @@ export default function ReceiptsPage() {
     setTotalEuros((receipt.totalCents / 100).toFixed(2));
     setPaymentMethod(receipt.paymentMethod ?? "");
     setLineItems(receipt.lineItems.map((line) => ({ ...line })));
+    setLineQuantityInputs(receipt.lineItems.map((line) => formatQuantity(line.quantity)));
     setLineAmountInputs(receipt.lineItems.map((line) => (line.amountCents / 100).toFixed(2)));
     setError(null);
     setFieldErrors({});
@@ -460,6 +466,8 @@ export default function ReceiptsPage() {
     if (lineItems.length === 0) validationErrors.lineItems = "Add at least one receipt line.";
     lineItems.forEach((line, index) => {
       if (!line.name.trim()) validationErrors[`line-${index}`] = "Enter an item name.";
+      const quantity = parseQuantity(lineQuantityInputs[index] ?? "");
+      if (quantity === null || quantity === 0) validationErrors[`quantity-${index}`] = "Enter a quantity above 0 and up to 9999, with at most 9 decimal places.";
     });
     setFieldErrors(validationErrors);
     if (Object.keys(validationErrors).length > 0) {
@@ -617,7 +625,7 @@ export default function ReceiptsPage() {
                 disabled={Boolean(review) || busy}
                 onChange={() => togglePurchaseItem(id)}
               />
-              <span>{item.name} ×{item.quantity}</span>
+              <span>{item.name} ×{formatQuantity(item.quantity)}</span>
               <small>{item.boughtAt?.toDate().toLocaleTimeString() ?? "Purchased"}</small>
             </label>
           ))}
@@ -759,7 +767,13 @@ export default function ReceiptsPage() {
             />
             {fieldErrors[`line-${index}`] && <span className="field-error" id={`receipt-line-${index}-error`}>{fieldErrors[`line-${index}`]}</span>}
           </label>
-          <label>Qty<input aria-label={`Line ${index + 1} quantity`} min="1" step="1" type="number" value={line.quantity} onChange={(event) => updateLine(index, { quantity: Math.max(1, Number(event.target.value) || 1) })} /></label>
+          <label>Qty<input aria-label={`Line ${index + 1} quantity`} aria-invalid={Boolean(fieldErrors[`quantity-${index}`])} inputMode="decimal" type="text" value={lineQuantityInputs[index] ?? ""} onChange={(event) => {
+            const value = event.target.value;
+            setLineQuantityInputs((current) => current.map((entry, entryIndex) => entryIndex === index ? value : entry));
+            const quantity = parseQuantity(value);
+            if (quantity !== null && quantity > 0) updateLine(index, { quantity });
+            clearFieldError(`quantity-${index}`);
+          }} />{fieldErrors[`quantity-${index}`] && <span className="field-error">{fieldErrors[`quantity-${index}`]}</span>}</label>
           <label>Amount (€)<input aria-label={`Line ${index + 1} amount in euros`} inputMode="decimal" type="text" value={lineAmountInputs[index] ?? ""} onChange={(event) => updateLineAmount(index, event.target.value)} onBlur={() => setLineAmountInputs((current) => current.map((amount, amountIndex) => amountIndex === index ? ((lineItems[index]?.amountCents ?? 0) / 100).toFixed(2) : amount))} /></label>
           <label>Category<select aria-label={`Line ${index + 1} category`} value={line.category} onChange={(event) => updateLine(index, { category: event.target.value as ExpenseCategory })}>
             {expenseCategories.map((category) => <option key={category}>{category}</option>)}
@@ -777,6 +791,7 @@ export default function ReceiptsPage() {
             rawName: "", name: "", quantity: 1, amountCents: 0, category: "Groceries", necessity: "essential"
           }]);
           setLineAmountInputs((current) => [...current, ""]);
+          setLineQuantityInputs((current) => [...current, "1"]);
         }}>＋ Add line</button>
         <button className="button secondary" onClick={closeEditor}>Cancel</button>
         <button className="button primary" disabled={busy} onClick={() => void saveReceipt()}>{busy ? "Saving…" : editingReceiptId ? "Update receipt" : "Save receipt"}</button>
@@ -796,7 +811,7 @@ export default function ReceiptsPage() {
             <span className="saved-receipt-chevron">{expandedReceipt === id ? "−" : "+"}</span>
           </button>
           {expandedReceipt === id && <div className="saved-receipt-lines">
-            {receipt.lineItems.map((line, index) => <div className="saved-line" key={`${line.name}-${index}`}><span>{line.name} <small>×{line.quantity} · {line.category}</small></span><strong>{formatCents(line.amountCents)}</strong></div>)}
+            {receipt.lineItems.map((line, index) => <div className="saved-line" key={`${line.name}-${index}`}><span>{line.name} <small>×{formatQuantity(line.quantity)} · {line.category}</small></span><strong>{formatCents(line.amountCents)}</strong></div>)}
             <button className="action-button" onClick={() => startEditingReceipt(id, receipt)}><span aria-hidden="true">✎</span> Edit receipt</button>
             <button className="action-button destructive-action" onClick={() => void removeReceipt(id)}><span aria-hidden="true">⌫</span> Delete receipt</button>
           </div>}

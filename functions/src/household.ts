@@ -55,38 +55,103 @@ export const bootstrapKitchen = onCall(
   async (request) => {
     const user = requireVerifiedUser(request);
     const db = getFirestore();
-    const kitchenRef = db.doc("kitchen/main");
-    const memberSettingsRef = kitchenRef.collection("memberSettings").doc(user.uid);
+    const accountRef = db.doc(`userAccounts/${user.uid}`);
+    const legacyKitchenRef = db.doc("kitchen/main");
+    const personalKitchenRef = db.doc(`kitchen/${user.uid}`);
     const profile = profileFromRequest(request);
     const allowed = new Set(
       allowedEmails.value().split(",").map((email) => email.trim().toLocaleLowerCase()).filter(Boolean)
     );
 
     return db.runTransaction(async (transaction) => {
-      const kitchen = await transaction.get(kitchenRef);
-      const memberSettings = await transaction.get(memberSettingsRef);
-      const currentSettings = kitchen.data() ?? {};
-      const currentMembers: unknown = kitchen.get("members");
-      if (typeof currentMembers === "object" && currentMembers !== null && !Array.isArray(currentMembers)) {
-        const role = Reflect.get(currentMembers, user.uid);
-        if (role === "owner" || role === "member") {
-          if (!memberSettings.exists) {
-            transaction.set(memberSettingsRef, memberSettingsFromKitchen(currentSettings));
-          }
-          return { status: role };
+      const account = await transaction.get(accountRef);
+      if (account.exists) {
+        const kitchenId: unknown = account.get("householdId");
+        if (typeof kitchenId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(kitchenId)) {
+          throw new HttpsError("failed-precondition", "This account has an invalid household association.");
         }
-        if (Object.keys(currentMembers).length > 0) return { status: "private" };
+        const kitchenRef = db.doc(`kitchen/${kitchenId}`);
+        const kitchen = await transaction.get(kitchenRef);
+        const members: unknown = kitchen.get("members");
+        const role = typeof members === "object" && members !== null && !Array.isArray(members)
+          ? Reflect.get(members, user.uid)
+          : null;
+        if ((role === "owner" || role === "member") && kitchen.exists) {
+          const memberSettingsRef = kitchenRef.collection("memberSettings").doc(user.uid);
+          const memberSettings = await transaction.get(memberSettingsRef);
+          if (!memberSettings.exists) {
+            transaction.set(memberSettingsRef, memberSettingsFromKitchen(kitchen.data() ?? {}));
+          }
+          return { status: role, householdId: kitchenId };
+        }
+        throw new HttpsError("failed-precondition", "This account is no longer a member of its active household.");
       }
 
-      if (!allowed.has(user.email)) return { status: "private" };
+      const legacyKitchen = await transaction.get(legacyKitchenRef);
+      const personalKitchen = await transaction.get(personalKitchenRef);
+      const legacyMembers: unknown = legacyKitchen.get("members");
+      const legacyRole = typeof legacyMembers === "object" && legacyMembers !== null && !Array.isArray(legacyMembers)
+        ? Reflect.get(legacyMembers, user.uid)
+        : null;
 
-      transaction.set(kitchenRef, {
-        ownerUid: user.uid,
-        members: { [user.uid]: "owner" },
-        memberProfiles: { [user.uid]: profile }
+      if (legacyRole === "owner" || legacyRole === "member") {
+        const memberSettingsRef = legacyKitchenRef.collection("memberSettings").doc(user.uid);
+        const memberSettings = await transaction.get(memberSettingsRef);
+        if (!memberSettings.exists) {
+          transaction.set(memberSettingsRef, memberSettingsFromKitchen(legacyKitchen.data() ?? {}));
+        }
+        transaction.set(accountRef, {
+          householdId: "main",
+          homeHouseholdId: legacyRole === "owner" ? "main" : null
+        });
+        return { status: legacyRole, householdId: "main" };
+      }
+
+      const legacyHasMembers = typeof legacyMembers === "object"
+        && legacyMembers !== null
+        && !Array.isArray(legacyMembers)
+        && Object.keys(legacyMembers).length > 0;
+      if (!legacyHasMembers && allowed.has(user.email)) {
+        const memberSettingsRef = legacyKitchenRef.collection("memberSettings").doc(user.uid);
+        transaction.set(legacyKitchenRef, {
+          ownerUid: user.uid,
+          members: { [user.uid]: "owner" },
+          memberProfiles: { [user.uid]: profile }
+        }, { merge: true });
+        transaction.set(memberSettingsRef, memberSettingsFromKitchen(legacyKitchen.data() ?? {}), { merge: true });
+        transaction.set(accountRef, { householdId: "main", homeHouseholdId: "main" });
+        return { status: "owner", householdId: "main" };
+      }
+
+      if (personalKitchen.exists) {
+        const members: unknown = personalKitchen.get("members");
+        const role = typeof members === "object" && members !== null && !Array.isArray(members)
+          ? Reflect.get(members, user.uid)
+          : null;
+        if (role !== "owner") {
+          throw new HttpsError("failed-precondition", "The personal household already exists in an invalid state.");
+        }
+      } else {
+        transaction.set(personalKitchenRef, {
+          reminderEnabled: true,
+          reminderHour: 9,
+          timeZone: "UTC",
+          budgetAlertsEnabled: true,
+          discretionaryCategories: ["Cafe & Eating out", "Snacks & Sweets", "Alcohol", "Tobacco"],
+          ownerUid: user.uid,
+          members: { [user.uid]: "owner" },
+          memberProfiles: { [user.uid]: profile }
+        });
+      }
+      transaction.set(personalKitchenRef.collection("memberSettings").doc(user.uid), {
+        ...memberSettingsFromKitchen(personalKitchen.data() ?? {}),
+        ...(personalKitchen.exists ? {} : { createdAt: FieldValue.serverTimestamp() })
       }, { merge: true });
-      transaction.set(memberSettingsRef, memberSettingsFromKitchen(currentSettings), { merge: true });
-      return { status: "owner" };
+      transaction.set(accountRef, {
+        householdId: user.uid,
+        homeHouseholdId: user.uid
+      });
+      return { status: "owner", householdId: user.uid };
     });
   }
 );
@@ -103,6 +168,7 @@ export const createInvite = onCall(
     const code = randomBytes(32).toString("base64url");
     const db = getFirestore();
     await db.collection("invites").doc(inviteHash(code)).create({
+      householdId: owner.householdId,
       emailHash: typeof email === "string"
         ? createHash("sha256").update(email.trim().toLocaleLowerCase()).digest("hex")
         : null,
@@ -124,16 +190,36 @@ export const joinHousehold = onCall(
     }
 
     const db = getFirestore();
-    const kitchenRef = db.doc("kitchen/main");
     const inviteRef = db.collection("invites").doc(inviteHash(code));
-    const memberSettingsRef = kitchenRef.collection("memberSettings").doc(user.uid);
+    const accountRef = db.doc(`userAccounts/${user.uid}`);
     const profile = profileFromRequest(request);
     return db.runTransaction(async (transaction) => {
       const invite = await transaction.get(inviteRef);
-      const kitchen = await transaction.get(kitchenRef);
-      if (!invite.exists || !kitchen.exists) {
+      if (!invite.exists) {
         throw new HttpsError("permission-denied", "This invitation is invalid or has already been used.");
       }
+      const kitchenId: unknown = invite.get("householdId");
+      if (typeof kitchenId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(kitchenId)) {
+        throw new HttpsError("failed-precondition", "This invitation does not reference a valid household.");
+      }
+      const kitchenRef = db.doc(`kitchen/${kitchenId}`);
+      const memberSettingsRef = kitchenRef.collection("memberSettings").doc(user.uid);
+      const kitchen = await transaction.get(kitchenRef);
+      const account = await transaction.get(accountRef);
+      if (!kitchen.exists || !account.exists) {
+        throw new HttpsError("permission-denied", "This invitation is invalid or has already been used.");
+      }
+      const oldHouseholdId: unknown = account.get("householdId");
+      const homeHouseholdId: unknown = account.get("homeHouseholdId");
+      const oldKitchenRef = typeof oldHouseholdId === "string"
+        && oldHouseholdId !== kitchenId
+        && /^[A-Za-z0-9_-]{1,128}$/.test(oldHouseholdId)
+        ? db.doc(`kitchen/${oldHouseholdId}`)
+        : null;
+      const oldKitchen = oldKitchenRef ? await transaction.get(oldKitchenRef) : null;
+      const oldDevices = oldKitchenRef
+        ? await transaction.get(oldKitchenRef.collection("devices").where("uid", "==", user.uid))
+        : null;
       const expiresAt = invite.get("expiresAt");
       if (!(expiresAt instanceof Timestamp) || expiresAt.toMillis() <= Date.now()) {
         throw new HttpsError("deadline-exceeded", "This invitation has expired.");
@@ -151,8 +237,31 @@ export const joinHousehold = onCall(
       }
       const existingRole = Reflect.get(members, user.uid);
       if (existingRole === "owner" || existingRole === "member") {
-        throw new HttpsError("already-exists", "This account is already a kitchen member.");
+        throw new HttpsError("already-exists", "This account is already a member of this household.");
       }
+      if (oldHouseholdId === kitchenId) {
+        throw new HttpsError("already-exists", "This account is already using this household.");
+      }
+      if (
+        oldKitchenRef
+        && oldKitchen?.exists
+        && homeHouseholdId !== oldHouseholdId
+      ) {
+        const oldMembers: unknown = oldKitchen.get("members");
+        if (
+          typeof oldMembers === "object"
+          && oldMembers !== null
+          && !Array.isArray(oldMembers)
+          && (Reflect.get(oldMembers, user.uid) === "owner" || Reflect.get(oldMembers, user.uid) === "member")
+        ) {
+          transaction.update(oldKitchenRef, {
+            [`members.${user.uid}`]: FieldValue.delete(),
+            [`memberProfiles.${user.uid}`]: FieldValue.delete()
+          });
+          transaction.delete(oldKitchenRef.collection("memberSettings").doc(user.uid));
+        }
+      }
+      for (const device of oldDevices?.docs ?? []) transaction.delete(device.ref);
       transaction.update(kitchenRef, {
         [`members.${user.uid}`]: "member",
         [`memberProfiles.${user.uid}`]: profile
@@ -161,8 +270,9 @@ export const joinHousehold = onCall(
         memberSettingsRef,
         memberSettingsFromKitchen(kitchen.data() ?? {})
       );
+      transaction.update(accountRef, { householdId: kitchenId });
       transaction.delete(inviteRef);
-      return { status: "member" };
+      return { status: "member", householdId: kitchenId };
     });
   }
 );
@@ -170,8 +280,8 @@ export const joinHousehold = onCall(
 export const listHouseholdMembers = onCall(
   { enforceAppCheck: enforceAppCheck.value() },
   async (request) => {
-    await requireOwner(request);
-    const kitchen = await getFirestore().doc("kitchen/main").get();
+    const owner = await requireOwner(request);
+    const kitchen = await getFirestore().doc(`kitchen/${owner.householdId}`).get();
     const members: unknown = kitchen.get("members");
     const profiles: unknown = kitchen.get("memberProfiles");
     if (typeof members !== "object" || members === null || Array.isArray(members)) {
@@ -203,7 +313,7 @@ export const removeHouseholdMember = onCall(
       throw new HttpsError("invalid-argument", "Select a non-owner household member.");
     }
     const db = getFirestore();
-    const kitchenRef = db.doc("kitchen/main");
+    const kitchenRef = db.doc(`kitchen/${owner.householdId}`);
     const memberSettingsRef = kitchenRef.collection("memberSettings").doc(uid);
     await db.runTransaction(async (transaction) => {
       const kitchen = await transaction.get(kitchenRef);
@@ -233,7 +343,7 @@ export const transferOwnership = onCall(
     if (uid === owner.uid) {
       throw new HttpsError("invalid-argument", "Select another household member.");
     }
-    const kitchenRef = getFirestore().doc("kitchen/main");
+    const kitchenRef = getFirestore().doc(`kitchen/${owner.householdId}`);
     await getFirestore().runTransaction(async (transaction) => {
       const kitchen = await transaction.get(kitchenRef);
       const members: unknown = kitchen.get("members");
@@ -258,9 +368,18 @@ export const leaveHousehold = onCall(
       throw new HttpsError("failed-precondition", "Transfer ownership before leaving the kitchen.");
     }
     const db = getFirestore();
-    const kitchenRef = db.doc("kitchen/main");
+    const kitchenRef = db.doc(`kitchen/${member.householdId}`);
+    const accountRef = db.doc(`userAccounts/${member.uid}`);
     await db.runTransaction(async (transaction) => {
+      const account = await transaction.get(accountRef);
       const kitchen = await transaction.get(kitchenRef);
+      const homeHouseholdId: unknown = account.get("homeHouseholdId");
+      const homeKitchenRef = typeof homeHouseholdId === "string"
+        && homeHouseholdId !== member.householdId
+        && /^[A-Za-z0-9_-]{1,128}$/.test(homeHouseholdId)
+        ? db.doc(`kitchen/${homeHouseholdId}`)
+        : null;
+      const homeKitchen = homeKitchenRef ? await transaction.get(homeKitchenRef) : null;
       const members: unknown = kitchen.get("members");
       if (
         typeof members !== "object"
@@ -279,8 +398,26 @@ export const leaveHousehold = onCall(
       });
       transaction.delete(kitchenRef.collection("memberSettings").doc(member.uid));
       for (const device of devices.docs) transaction.delete(device.ref);
+      if (homeKitchenRef && homeKitchen?.exists) {
+        const homeMembers: unknown = homeKitchen.get("members");
+        if (
+          typeof homeMembers !== "object"
+          || homeMembers === null
+          || Array.isArray(homeMembers)
+          || Reflect.get(homeMembers, member.uid) !== "owner"
+        ) {
+          throw new HttpsError("failed-precondition", "Your personal household is no longer available.");
+        }
+        transaction.update(accountRef, { householdId: homeHouseholdId });
+      } else {
+        transaction.delete(accountRef);
+      }
     });
-    return { status: "left" };
+    const account = await accountRef.get();
+    const householdId: unknown = account.get("householdId");
+    return typeof householdId === "string"
+      ? { status: "owner", householdId }
+      : { status: "left" };
   }
 );
 
@@ -292,7 +429,7 @@ export const deleteMyAccount = onCall(
       throw new HttpsError("failed-precondition", "The owner must transfer ownership before deleting this account.");
     }
     const db = getFirestore();
-    const kitchenRef = db.doc("kitchen/main");
+    const kitchenRef = db.doc(`kitchen/${member.householdId}`);
     await db.runTransaction(async (transaction) => {
       const kitchen = await transaction.get(kitchenRef);
       const members: unknown = kitchen.get("members");
@@ -314,6 +451,7 @@ export const deleteMyAccount = onCall(
       transaction.delete(kitchenRef.collection("memberSettings").doc(member.uid));
       for (const device of devices.docs) transaction.delete(device.ref);
     });
+    await db.doc(`userAccounts/${member.uid}`).delete();
     await getAuth().deleteUser(member.uid);
     return { status: "deleted" };
   }

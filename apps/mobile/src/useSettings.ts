@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { doc, getDocFromServer, onSnapshot } from "firebase/firestore";
-import { ensureSettings, expenseCategories, KITCHEN_DOC_PATH, memberSettingsDocument } from "@my-kitchen/shared";
+import { ensureSettings, expenseCategories, getKitchenDocPath, memberSettingsDocument } from "@my-kitchen/shared";
 import type { KitchenSettings } from "@my-kitchen/shared";
 import { z } from "zod";
 import { getDatabase, getFirebaseAuth } from "./firebase";
+import { useKitchenId } from "./useKitchenPath";
 
 const settingsSchema = z.object({
   reminderEnabled: z.boolean(),
@@ -28,6 +29,7 @@ function readMemberSettings(value: unknown): Partial<Pick<KitchenSettings, "remi
 }
 
 export function useSettings() {
+  const kitchenId = useKitchenId();
   const [data, setData] = useState<KitchenSettings | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -39,7 +41,7 @@ export function useSettings() {
     try {
       const db = getDatabase();
       const [snapshot, memberSnapshot] = await Promise.all([
-        getDocFromServer(doc(db, KITCHEN_DOC_PATH)),
+        getDocFromServer(doc(db, getKitchenDocPath())),
         memberUid ? getDocFromServer(memberSettingsDocument(db, memberUid)) : Promise.resolve(null)
       ]);
       const kitchenSettings = settingsSchema.parse(snapshot.data());
@@ -53,7 +55,7 @@ export function useSettings() {
     } finally {
       setLoading(false);
     }
-  }, [memberUid]);
+  }, [memberUid, kitchenId]);
 
   useEffect(() => {
     const unsubscribers: Array<() => void> = [];
@@ -73,7 +75,7 @@ export function useSettings() {
         const db = getDatabase();
         await ensureSettings(db, timeZone);
         if (cancelled) return;
-        unsubscribers.push(onSnapshot(doc(db, KITCHEN_DOC_PATH), (snapshot) => {
+        unsubscribers.push(onSnapshot(doc(db, getKitchenDocPath()), (snapshot) => {
           try {
             kitchenSettings = settingsSchema.parse(snapshot.data());
             publish();
@@ -114,7 +116,7 @@ export function useSettings() {
       cancelled = true;
       for (const unsubscribe of unsubscribers) unsubscribe();
     };
-  }, [memberUid]);
+  }, [memberUid, kitchenId]);
 
   return { data, error, loading, refresh };
 }

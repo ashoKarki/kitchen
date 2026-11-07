@@ -7,11 +7,11 @@ import {
   serverTimestamp,
   type Firestore
 } from "firebase/firestore";
-import { KITCHEN_DOC_PATH } from "./constants.js";
+import { getKitchenDocPath } from "./constants.js";
 import type { BudgetDraft } from "./types.js";
 
 function budgetCollection(db: Firestore) {
-  return collection(db, `${KITCHEN_DOC_PATH}/budgets`);
+  return collection(db, `${getKitchenDocPath()}/budgets`);
 }
 
 export async function createBudget(db: Firestore, budget: BudgetDraft): Promise<string> {

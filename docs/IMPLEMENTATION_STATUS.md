@@ -4,18 +4,19 @@ Audited on 2026-11-06. "DONE" means the existing code already provides the reque
 
 | Feature | Status | Evidence | Planned change |
 |---|---|---|---|
-| Google-only sign-in and signed-out gates | PARTIAL | `apps/web/src/App.tsx`, `apps/mobile/app/_layout.tsx`, `apps/mobile/src/GoogleSignInScreen.tsx` | Keep Google sign-in; replace hard-coded single-email authorization with household bootstrap and membership. Add redirect fallback and verified-member error states. |
-| Household memberships, roles, profiles | PARTIAL | `functions/src/household.ts`, `functions/src/auth.ts`, `apps/web/src/App.tsx`, `apps/mobile/app/_layout.tsx`, `firestore.rules` | Bootstrap and app gates support owner/member access; add owner management UI and member attribution on records. |
-| Household migration | DONE | `functions/src/household.ts`, existing data remains at `kitchen/main/**` | Bootstrap adds metadata in place; no data migration or path change. |
+| Google-only sign-in and signed-out gates | DONE | `apps/web/src/App.tsx`, `apps/mobile/app/_layout.tsx`, `apps/mobile/src/GoogleSignInScreen.tsx` | Any verified Google account bootstraps a private owner household; existing members are mapped to their current household. |
+| Household memberships, roles, profiles | DONE | `functions/src/household.ts`, `functions/src/auth.ts`, both Settings screens, `firestore.rules` | Active household IDs scope client data, callable functions, and Firestore access. |
+| Household migration | PARTIAL | `functions/src/household.ts`, `packages/shared/src/constants.ts` | Existing records stay under `kitchen/main`; deploy Functions, rules, and clients together, and verify legacy account mappings before rollout. |
 | Member settings and device ownership | PARTIAL | `functions/src/household.ts`, `packages/shared/src/settingsService.ts`, both settings screens, `functions/src/budgetAlerts.ts`, `apps/mobile/src/push.ts`, `firestore.rules` | Reminder and budget-alert settings are member-specific; finish per-member reminder scheduling and other preferences. |
-| Invites, member management, account deletion | PARTIAL | `functions/src/household.ts`, both Settings screens, `apps/mobile/src/GoogleSignInScreen.tsx` | Hashed single-use invites, join flow, owner member operations and member account deletion callable exist; add member leave/delete UI and owner delete/export flow. |
+| Invites, member management, account deletion | PARTIAL | `functions/src/household.ts`, both Settings screens | Hashed single-use invites target a household; redemption changes the active household to member and retains the prior personal household. Member leave/delete UI and owner export remain unimplemented. |
 | App Check on callable functions | PARTIAL | `functions/src/household.ts`, `functions/src/scanReceipt.ts`, `functions/src/generateInsights.ts` | Server enforcement is configurable and defaults off; configure client providers before enabling it. |
 | APP_KEY removal | DONE | `functions/src/scanReceipt.ts`, `functions/src/generateInsights.ts`, both receipt and insight screens, both `.env.example` files | Client APP_KEY and server validation have been removed; remove obsolete Secret Manager version after rollout. |
-| Firestore membership rules and regression suite | DONE | `firestore.rules`, `firestore.rules.test.mjs` | Emulator tests cover membership reads, protected metadata, own-profile updates, and private member settings; retain the temporary fallback until rollout verification. |
+| Firestore membership rules and regression suite | DONE | `firestore.rules`, `firestore.rules.test.mjs` | Emulator tests cover per-household isolation, protected account mappings, member reads, own-profile updates, and private member settings. |
 | Bootstrap/deployment checklist | DONE | `docs/DEPLOY_CHECKLIST.md`, `README.md` | Follow the documented manual review sequence; do not deploy as part of this task. |
+| Public landing page, privacy policy and publishing information | PARTIAL | `apps/web/src/PublicSite.tsx`, `apps/web/src/publicSite.css`, `apps/web/public/sitemap.xml`, `docs/PUBLISHING_CHECKLIST.md` | Pages and account-deletion flow exist. Configure legal publisher details and review policy and store-console disclosures before release. |
 | Firestore scheduled backups and retention | MISSING | `functions/src/index.ts`, `firebase.json` | Add scheduled export and document bucket lifecycle and IAM setup. |
 | JSON export/import | MISSING | No export/import implementation in `functions/src` or application screens | Add owner-authorized export and preview/confirm import. |
-| Soft delete, undo, recently deleted | MISSING | `packages/shared/src/itemService.ts`, `packages/shared/src/receiptService.ts`, `packages/shared/src/budgetService.ts` | Add additive deletion metadata, filtered views, undo, restore, purge, and settings UI. |
+| Soft delete, undo, recently deleted | PARTIAL | `packages/shared/src/itemService.ts`, `functions/src/deletedItems.ts`, inventory screens | Pantry and shopping items offer a one-minute undo window and scheduled purge. Receipt and budget deletion remain immediate. |
 | AI token/cost usage and soft limits | PARTIAL | `functions/src/scanReceipt.ts`, `functions/src/generateInsights.ts` | Existing per-day request caps do not account for tokens/cost. Extend usage after authorization and provider calls are unified. |
 | Sentry, safe scrubbing, error boundaries | MISSING | No Sentry or ErrorBoundary implementation in app entry points or Functions | Add optional DSN-based monitoring with strict PII scrubbing and friendly fallback UI. |
 | Offline persistence and connectivity indicator | PARTIAL | `apps/web/src/firebase.ts`, `apps/mobile/src/firebase.ts`; Firestore listeners are used | Explicitly configure durable cache/connectivity and expose pending-write/offline status. |
@@ -48,9 +49,9 @@ Audited on 2026-11-06. "DONE" means the existing code already provides the reque
 
 ## Assumptions
 
-- The existing `kitchen/main` data path remains canonical; no collection migration is performed.
+- Existing `kitchen/main` data remains in place for legacy members; new personal households use `kitchen/{uid}` and household membership selects the active path.
 - The production Firebase project is never modified by this work. Validation uses local tests and the `demo-my-kitchen` emulators only.
-- Current receipt and expense records remain readable during membership rollout. The legacy verified-owner rules fallback remains until the owner manually verifies bootstrap.
+- Current receipt and expense records remain readable for users whose active account mapping points to their household. Functions, rules, and clients require a coordinated rollout.
 - Native Android/iOS projects are generated build output and are not source-of-truth; Expo app config and source assets are retained.
 - Features that depend on third-party console credentials, paid services, native development builds, or owner configuration remain opt-in and are documented rather than represented as already configured.
 

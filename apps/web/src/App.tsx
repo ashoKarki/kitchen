@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { Link, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { FirebaseError } from "firebase/app";
+import { doc, getDoc } from "firebase/firestore";
 import {
   GoogleAuthProvider,
   onAuthStateChanged,
@@ -11,15 +12,25 @@ import {
 import { httpsCallable } from "firebase/functions";
 import {
   createItem,
-  completeShoppingList,
+  adjustItemQuantity,
   deleteItem,
   expenseCategories,
-  itemsForPurchaseCompletion,
+  filterItemsByName,
+  formatQuantity,
   itemsForView,
+  recentlyDeletedItems,
+  itemUndoMilliseconds,
+  parseQuantity,
   ensureSettings,
   setItemBought,
+  stockWarning,
   updateItem,
+  undoDeleteItem,
   updateSettings,
+  getKitchenDocPath,
+  setActiveKitchenId,
+  bootstrapPersonalHousehold,
+  householdBootstrapErrorMessage,
   type ExpenseCategory,
   type ItemState,
   type KitchenItem,
@@ -29,8 +40,13 @@ import { getCloudFunctions, getDatabase, getFirebaseAuth } from "./firebase";
 import { useItems, useSettings } from "./hooks";
 import BudgetsPage from "./BudgetsPage";
 import InsightsPage from "./InsightsPage";
+import NotificationsPage from "./NotificationsPage";
+import { useBudgetAlerts } from "./useBudgetData";
 import ReceiptsPage from "./ReceiptsPage";
 import { useToast } from "./toast";
+import { useKitchenId } from "./useKitchenPath";
+import { inventorySwipeDirection, inventorySwipeOffset } from "./inventorySwipe";
+import "./style.css";
 
 const routes = [
   { path: "/", label: "Pantry" },
@@ -43,6 +59,15 @@ const routes = [
 
 function PageMessage({ children }: { children: string }) {
   return <p className="message" role="status">{children}</p>;
+}
+
+function NotificationsLink() {
+  const { data, error } = useBudgetAlerts();
+  const unread = data?.filter(({ alert }) => !alert.read).length ?? 0;
+  return <Link to="/notifications" className="notifications-link" aria-label={error ? "Notifications, unable to load" : `Notifications${unread ? `, ${unread} unread` : ""}`} title={error ? `Could not load notifications: ${error}` : "Notifications"}>
+    <svg aria-hidden="true" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" /></svg>
+    {unread > 0 && <span className="notifications-badge">{unread > 99 ? "99+" : unread}</span>}
+  </Link>;
 }
 
 function authErrorMessage(error: unknown): string {
@@ -74,7 +99,7 @@ function SignInGate({
       <p className="eyebrow">YOUR PRIVATE KITCHEN</p>
       <h1>Sign in to My Kitchen</h1>
       <p className="muted">Sign in with Google to access your pantry and spending data.</p>
-      {privateAccess && <p className="error" role="status">This app is private. Join with a single-use invitation code.</p>}
+      {privateAccess && <p className="error" role="status">Set up your household, or join an existing one with an invitation code.</p>}
       {error && <p className="error" role="alert">{error}</p>}
       {privateAccess && <form onSubmit={(event) => {
         event.preventDefault();
@@ -105,23 +130,23 @@ function ItemEditor({
 }) {
   const { showToast } = useToast();
   const [name, setName] = useState(initial?.item.name ?? "");
-  const [quantity, setQuantity] = useState(String(initial?.item.quantity ?? 1));
+  const [quantity, setQuantity] = useState(formatQuantity(initial?.item.quantity ?? 1));
   const [category, setCategory] = useState<ExpenseCategory>(initial?.item.category ?? "Other");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const minimumQuantity = initial && initial.item.state !== "toBuy" ? 0 : defaultState === "toBuy" ? 1 : 0;
+  const allowsZero = initial ? initial.item.state !== "toBuy" : defaultState !== "toBuy";
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const parsedQuantity = Number(quantity);
+    const parsedQuantity = parseQuantity(quantity);
     if (!name.trim()) {
       const message = "Enter an item name.";
       setError(message);
       showToast(message, "error");
       return;
     }
-    if (!Number.isInteger(parsedQuantity) || parsedQuantity < minimumQuantity || parsedQuantity > 9999) {
-      const message = `Quantity must be a whole number between ${minimumQuantity} and 9999.`;
+    if (parsedQuantity === null || (!allowsZero && parsedQuantity === 0)) {
+      const message = `Quantity must be ${allowsZero ? "at least" : "greater than"} 0 and at most 9999, with up to 9 decimal places.`;
       setError(message);
       showToast(message, "error");
       return;
@@ -129,7 +154,7 @@ function ItemEditor({
     setSaving(true);
     setError(null);
     try {
-      await onSave({ name: name.trim(), quantity: parsedQuantity, category, state: defaultState });
+      await onSave({ name: name.trim(), quantity: parsedQuantity, category, state: defaultState === "inStock" && parsedQuantity === 0 ? "finished" : defaultState });
       onCancel();
     } catch (saveError) {
       const message = saveError instanceof Error ? saveError.message : String(saveError);
@@ -149,7 +174,7 @@ function ItemEditor({
       <div className="form-grid">
         <label>
           Quantity
-          <input aria-label="Quantity" type="number" min={minimumQuantity} max="9999" step="1" value={quantity} onChange={(event) => setQuantity(event.target.value)} />
+          <input aria-label="Quantity" type="number" min="0" max="9999" step="any" inputMode="decimal" value={quantity} onChange={(event) => setQuantity(event.target.value)} />
         </label>
         <label>
           Category
@@ -175,6 +200,7 @@ function InventoryItemCard({
   onFinish,
   onBought,
   onRestock,
+  onAdjust,
   onDelete,
   onError
 }: {
@@ -185,16 +211,20 @@ function InventoryItemCard({
   onFinish: () => void;
   onBought: (bought: boolean) => void;
   onRestock: () => void;
+  onAdjust: (direction: "add" | "subtract") => void;
   onDelete: (id: string) => Promise<void>;
   onError: (message: string) => void;
 }) {
   const pointerStart = useRef<{ x: number; y: number } | null>(null);
   const lastSwipeAt = useRef(0);
   const [deleting, setDeleting] = useState(false);
+  const [swipeOffset, setSwipeOffset] = useState(0);
+  const warning = shopping ? null : stockWarning(item);
 
   function triggerDelete() {
     if (deleting) return;
     lastSwipeAt.current = Date.now();
+    if (!window.confirm(`Delete ${item.name}? You can undo this for one minute.`)) return;
     setDeleting(true);
     window.setTimeout(() => {
       void onDelete(id).catch((caught: unknown) => {
@@ -209,36 +239,48 @@ function InventoryItemCard({
     pointerStart.current = { x: event.clientX, y: event.clientY };
   }
 
+  function onPointerMove(event: ReactPointerEvent<HTMLElement>) {
+    const start = pointerStart.current;
+    if (!start) return;
+    const deltaX = event.clientX - start.x;
+    const deltaY = event.clientY - start.y;
+    if (Math.abs(deltaX) < 12 || Math.abs(deltaX) <= Math.abs(deltaY)) return;
+    if (!event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.setPointerCapture(event.pointerId);
+    lastSwipeAt.current = Date.now();
+    setSwipeOffset(inventorySwipeOffset(deltaX));
+  }
+
   function onPointerUp(event: ReactPointerEvent<HTMLElement>) {
     const start = pointerStart.current;
     pointerStart.current = null;
+    setSwipeOffset(0);
     if (!start) return;
 
-    const deltaX = event.clientX - start.x;
-    const deltaY = event.clientY - start.y;
-    if (Math.abs(deltaX) < 65 || Math.abs(deltaX) <= Math.abs(deltaY)) return;
-
-    if (deltaX < 0) {
+    const direction = inventorySwipeDirection(event.clientX - start.x, event.clientY - start.y);
+    if (!direction) return;
+    lastSwipeAt.current = Date.now();
+    if (direction === "left") {
       triggerDelete();
-    } else if (!shopping) {
-      lastSwipeAt.current = Date.now();
-      onRestock();
+    } else if (shopping) {
+      onBought(item.bought !== true);
     } else {
-      lastSwipeAt.current = Date.now();
+      onRestock();
     }
   }
 
   return (
     <article
-      className={`item-card${!shopping && item.quantity === 1 ? " stock-critical" : ""}${!shopping && item.quantity !== 1 && item.quantity <= 3 ? " stock-low" : ""}${deleting ? " swipe-deleting" : ""}`}
+      className={`item-card${shopping ? "" : " pantry-card"}${warning === "critical" ? " stock-critical" : ""}${warning === "low" ? " stock-low" : ""}${deleting ? " swipe-deleting" : ""}`}
+      style={swipeOffset && !deleting ? { transform: `translateX(${swipeOffset}px)` } : undefined}
       onClickCapture={(event) => {
         if (Date.now() - lastSwipeAt.current < 400) {
           event.preventDefault();
           event.stopPropagation();
         }
       }}
-      onPointerCancel={() => { pointerStart.current = null; }}
+      onPointerCancel={() => { pointerStart.current = null; setSwipeOffset(0); }}
       onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
     >
       {shopping && <button
@@ -251,10 +293,12 @@ function InventoryItemCard({
       >{item.bought ? "×" : ""}</button>}
       <button className="item-main" onClick={onEdit}>
         <span className={`item-name${shopping && item.bought ? " bought-item" : ""}`}>{item.name}</span>
-        <span className={`muted${shopping && item.bought ? " bought-item" : ""}`}>Qty {item.quantity} · {item.category}</span>
+        <span className={`muted${shopping && item.bought ? " bought-item" : ""}`}>Qty {formatQuantity(item.quantity)} · {item.category}{warning ? ` · ${warning === "critical" ? "Critical stock" : "Low stock"}` : ""}</span>
       </button>
       {item.state === "finished" && <span className="pill finished">Finished</span>}
       <div className="item-actions">
+        {!shopping && <button className="button small secondary" aria-label={`Subtract from ${item.name}`} onClick={() => onAdjust("subtract")}>−</button>}
+        {!shopping && <button className="button small secondary" aria-label={`Add to ${item.name}`} onClick={() => onAdjust("add")}>＋</button>}
         {!shopping && item.state === "inStock" && <button className="button small secondary" onClick={onFinish}>Finished</button>}
         {!shopping && item.state === "finished" && <button className="button small secondary" onClick={onRestock}>Restock</button>}
         <button className="icon-button" aria-label={`Delete ${item.name}`} onClick={triggerDelete}>⌫</button>
@@ -275,14 +319,20 @@ function InventoryPage({ shopping }: { shopping: boolean }) {
   const [restockQuantity, setRestockQuantity] = useState("");
   const [restockError, setRestockError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [adjustTarget, setAdjustTarget] = useState<{ id: string; item: KitchenItem; direction: "add" | "subtract" } | null>(null);
+  const [adjustAmount, setAdjustAmount] = useState("");
+  const [adjustError, setAdjustError] = useState<string | null>(null);
+  const [adjustBusy, setAdjustBusy] = useState(false);
+  const pendingPurchases = useRef(new Set<string>());
 
-  const shown = useMemo(() => itemsForView(items.data ?? [], shopping ? "shopping" : "pantry", now).filter(({ item }) => {
+  const shown = useMemo(() => filterItemsByName(itemsForView(items.data ?? [], shopping ? "shopping" : "pantry", now), search).filter(({ item }) => {
     if (!shopping && category !== "All categories" && item.category !== category) return false;
-    return shopping || item.name.toLocaleLowerCase().includes(search.toLocaleLowerCase());
+    return true;
   }), [category, items.data, now, search, shopping]);
+  const deleted = recentlyDeletedItems(items.data ?? [], now.getTime());
 
   useEffect(() => {
-    const timer = window.setInterval(() => setNow(new Date()), 60_000);
+    const timer = window.setInterval(() => setNow(new Date()), 1_000);
     return () => window.clearInterval(timer);
   }, []);
 
@@ -291,6 +341,10 @@ function InventoryPage({ shopping }: { shopping: boolean }) {
       await updateItem(getDatabase(), editing.id, {
         name: item.name,
         quantity: item.quantity,
+        ...(editing.item.state !== "toBuy" ? {
+          stockBaseline: item.quantity > editing.item.quantity ? item.quantity : (editing.item.stockBaseline ?? editing.item.quantity),
+          ...(item.quantity !== editing.item.quantity ? { state: item.quantity === 0 ? "finished" : "inStock" } : {})
+        } : {}),
         category: item.category,
         bought: false,
         boughtAt: null,
@@ -318,48 +372,33 @@ function InventoryPage({ shopping }: { shopping: boolean }) {
   }
 
   async function markBought(id: string, bought: boolean) {
-    const shoppingItems = itemsForView(items.data ?? [], "shopping");
-    const purchaseItems = itemsForPurchaseCompletion(shoppingItems);
-    const target = shoppingItems.find(({ id: itemId }) => itemId === id);
-    const allBought = purchaseItems.length > 0 && purchaseItems.every(({ id: itemId, item }) => (
-      itemId === id ? bought : item.bought === true
-    ));
+    if (pendingPurchases.current.has(id)) return;
+    pendingPurchases.current.add(id);
     try {
-      if (allBought) {
-        await completeShoppingList(
-          getDatabase(),
-          purchaseItems.map(({ id: itemId }) => itemId),
-          id
-        );
-        showToast("All shopping-list items purchased and moved to Pantry.");
-      } else {
-        await setItemBought(
-          getDatabase(),
-          id,
-          bought,
-          !bought && target?.item.state === "inStock" ? "toBuy" : undefined
-        );
-        if (!bought) showToast("Purchase unchecked.", "info");
-      }
+      await setItemBought(getDatabase(), id, bought);
+      showToast(bought ? "Item moved to Pantry." : "Purchase unchecked.", "info");
       setError(null);
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : String(caught);
       setError(message);
       showToast(message, "error");
+    } finally {
+      pendingPurchases.current.delete(id);
     }
   }
 
   async function saveRestock(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const quantity = Number(restockQuantity);
-    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 9999) {
-      setRestockError("Enter a whole number between 1 and 9999.");
+    const quantity = parseQuantity(restockQuantity);
+    if (quantity === null || quantity === 0) {
+      setRestockError("Enter an amount above 0 and up to 9999, with at most 9 decimal places.");
       return;
     }
     if (!restockTarget) return;
     try {
       await updateItem(getDatabase(), restockTarget.id, {
         quantity,
+        stockBaseline: quantity,
         state: "inStock",
         bought: false,
         boughtAt: null,
@@ -377,16 +416,49 @@ function InventoryPage({ shopping }: { shopping: boolean }) {
     }
   }
 
+  async function saveAdjustment(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!adjustTarget || adjustBusy) return;
+    const amount = parseQuantity(adjustAmount);
+    if (amount === null || amount === 0) {
+      setAdjustError("Enter an amount above 0 and up to 9999, with at most 9 decimal places.");
+      return;
+    }
+    setAdjustBusy(true);
+    setAdjustError(null);
+    try {
+      await adjustItemQuantity(getDatabase(), adjustTarget.id, adjustTarget.direction === "add" ? amount : -amount);
+      setAdjustTarget(null);
+      showToast("Quantity updated.");
+    } catch (caught) {
+      setAdjustError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setAdjustBusy(false);
+    }
+  }
+
   async function removeAfterSwipe(id: string) {
     try {
       await deleteItem(getDatabase(), id);
       setError(null);
-      showToast("Item deleted.");
+      showToast("Item deleted. You can undo for one minute.");
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : String(caught);
       setError(message);
       showToast(message, "error");
       throw caught;
+    }
+  }
+
+  async function undoDelete(id: string) {
+    try {
+      await undoDeleteItem(getDatabase(), id);
+      setError(null);
+      showToast("Item restored.");
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : String(caught);
+      setError(message);
+      showToast(message, "error");
     }
   }
 
@@ -403,20 +475,26 @@ function InventoryPage({ shopping }: { shopping: boolean }) {
         </div>
         <button className="button primary" onClick={() => { setEditing(null); setAdding(true); }}>＋ Add item</button>
       </div>
-      {!shopping && <div className="filters">
-        <label className="search-field">Search pantry<input aria-label="Search pantry" placeholder="Find an item…" value={search} onChange={(event) => setSearch(event.target.value)} /></label>
-        <label>Category<select aria-label="Filter by category" value={category} onChange={(event) => setCategory(event.target.value)}>
+      <div className="filters">
+        <label className="search-field">Search {shopping ? "shopping list" : "pantry"}<input aria-label={shopping ? "Search shopping list" : "Search pantry"} placeholder="Find an item…" value={search} onChange={(event) => setSearch(event.target.value)} /></label>
+        {!shopping && <label>Category<select aria-label="Filter by category" value={category} onChange={(event) => setCategory(event.target.value)}>
           <option>All categories</option>{expenseCategories.map((entry) => <option key={entry}>{entry}</option>)}
-        </select></label>
-      </div>}
+        </select></label>}
+      </div>
       <p className="swipe-hint">
-        {shopping ? "Swipe left to delete · check off items as you buy them" : "Swipe right to restock · swipe left to delete"}
+        {shopping ? "Swipe right to mark or reset purchase · swipe left to delete" : "Swipe right to restock · swipe left to delete"}
       </p>
       {error && <p className="error" role="alert">{error}</p>}
+      {deleted.length > 0 && <div className="deleted-items" aria-label="Recently deleted items">
+        {deleted.map(({ id, item }) => <div className="deleted-item" key={id}>
+          <span>{item.name} deleted · {Math.max(0, Math.ceil(((item.deletedAt?.toMillis() ?? 0) + itemUndoMilliseconds - now.getTime()) / 1000))}s to undo</span>
+          <button className="button small secondary" onClick={() => void undoDelete(id)}>Undo</button>
+        </div>)}
+      </div>}
       {shown.length === 0 ? <div className="empty">
         <span className="empty-icon">{shopping ? "✓" : "⌂"}</span>
-        <h2>{shopping ? "Your list is clear" : "Your pantry is empty"}</h2>
-        <p>{shopping ? "Add an item or mark pantry items as finished to see them here." : "Add your first kitchen item to get started."}</p>
+        <h2>{search.trim() || (!shopping && category !== "All categories") ? "No matching items" : shopping ? "Your list is clear" : "Your pantry is empty"}</h2>
+        <p>{search.trim() || (!shopping && category !== "All categories") ? "Try a different search or filter." : shopping ? "Add an item or mark pantry items as finished to see them here." : "Add your first kitchen item to get started."}</p>
       </div> : <div className="item-list">{shown.map(({ id, item }) => (
         <InventoryItemCard
           key={id}
@@ -431,10 +509,29 @@ function InventoryPage({ shopping }: { shopping: boolean }) {
             setRestockQuantity("");
             setRestockError(null);
           }}
+          onAdjust={(direction) => {
+            setAdjustTarget({ id, item, direction });
+            setAdjustAmount("");
+            setAdjustError(null);
+          }}
           onDelete={removeAfterSwipe}
           onError={setError}
         />
       ))}</div>}
+      {adjustTarget && <div className="dialog-backdrop">
+        <section className="dialog" role="dialog" aria-modal="true" aria-labelledby="adjust-dialog-title">
+          <h2 id="adjust-dialog-title">{adjustTarget.direction === "add" ? "Add to" : "Subtract from"} {adjustTarget.item.name}</h2>
+          <p className="muted">Current quantity: {formatQuantity(adjustTarget.item.quantity)}</p>
+          <form className="item-form" onSubmit={(event) => void saveAdjustment(event)}>
+            <label>Amount<input aria-label="Adjustment amount" type="number" min="0" max="9999" step="any" inputMode="decimal" autoFocus value={adjustAmount} onChange={(event) => setAdjustAmount(event.target.value)} /></label>
+            {adjustError && <p className="error" role="alert">{adjustError}</p>}
+            <div className="actions">
+              <button type="button" className="button secondary" disabled={adjustBusy} onClick={() => setAdjustTarget(null)}>Cancel</button>
+              <button className="button primary" disabled={adjustBusy}>Update quantity</button>
+            </div>
+          </form>
+        </section>
+      </div>}
       {(adding || editing) && <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) { setAdding(false); setEditing(null); } }}>
         <section className="dialog" role="dialog" aria-modal="true" aria-labelledby="item-dialog-title">
           <p className="eyebrow">KITCHEN INVENTORY</p>
@@ -463,10 +560,10 @@ function InventoryPage({ shopping }: { shopping: boolean }) {
               <input
                 aria-label="New stock quantity"
                 autoFocus
-                inputMode="numeric"
-                min="1"
+                inputMode="decimal"
+                min="0"
                 max="9999"
-                step="1"
+                step="any"
                 type="number"
                 value={restockQuantity}
                 onChange={(event) => setRestockQuantity(event.target.value)}
@@ -549,7 +646,44 @@ function SettingsPage() {
       </label>)}
     </div>
     <HouseholdSettings />
+    <AccountSettings />
     <div className="settings-card app-info"><h2>My Kitchen</h2><p className="muted">Personal kitchen and spending tracker · English interface · EUR</p></div>
+  </section>;
+}
+
+function AccountSettings() {
+  const { showToast } = useToast();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function deleteAccount() {
+    if (!window.confirm("Delete your My Kitchen account? You will lose access to this household. Shared household records will remain for other members.")) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const remove = httpsCallable<void, { status: "deleted" }>(getCloudFunctions(), "deleteMyAccount");
+      await remove();
+      await signOut(getFirebaseAuth());
+      showToast("Account deleted.");
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : String(caught);
+      setError(message);
+      showToast(message, "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return <section className="settings-card">
+    <h2>Account</h2>
+    <p className="muted">Deleting your account removes your household membership, personal settings and registered devices. Shared household records are not deleted.</p>
+    <p className="hint">Owners must transfer ownership before deleting their account. Deleting your account does not delete the household.</p>
+    {error && <p className="error" role="alert">{error}</p>}
+    <button className="button secondary" disabled={busy} onClick={() => void deleteAccount()}>
+      {busy ? "Deleting…" : "Delete my account"}
+    </button>
   </section>;
 }
 
@@ -561,34 +695,43 @@ interface HouseholdMemberInfo {
 
 function HouseholdSettings() {
   const { showToast } = useToast();
+  const kitchenId = useKitchenId();
   const [members, setMembers] = useState<HouseholdMemberInfo[] | null>(null);
   const [email, setEmail] = useState("");
   const [inviteCode, setInviteCode] = useState<string | null>(null);
+  const [joinCode, setJoinCode] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   async function loadMembers() {
     try {
-      const list = httpsCallable<void, { members: HouseholdMemberInfo[] }>(
-        getCloudFunctions(),
-        "listHouseholdMembers"
-      );
-      const response = await list();
-      setMembers(response.data.members);
-    } catch (caught) {
-      const code = caught instanceof FirebaseError ? caught.code : "";
-      if (code === "functions/permission-denied") {
-        setMembers([]);
-        setError(null);
-      } else {
-        setError(caught instanceof Error ? caught.message : String(caught));
+      const snapshot = await getDoc(doc(getDatabase(), getKitchenDocPath()));
+      if (!snapshot.exists()) throw new Error("The active household could not be found.");
+      const rawMembers: unknown = snapshot.get("members");
+      const rawProfiles: unknown = snapshot.get("memberProfiles");
+      if (typeof rawMembers !== "object" || rawMembers === null || Array.isArray(rawMembers)) {
+        throw new Error("The active household has invalid membership data.");
       }
+      const members = Object.entries(rawMembers).flatMap(([uid, role]) => {
+        if (role !== "owner" && role !== "member") return [];
+        const profile = typeof rawProfiles === "object" && rawProfiles !== null
+          ? Reflect.get(rawProfiles, uid)
+          : null;
+        const displayName = typeof profile === "object" && profile !== null
+          ? Reflect.get(profile, "displayName")
+          : null;
+        return [{ uid, role, displayName: typeof displayName === "string" ? displayName : "" }];
+      });
+      setMembers(members);
+      setError(null);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
     }
   }
 
   useEffect(() => {
     void loadMembers();
-  }, []);
+  }, [kitchenId]);
 
   async function createHouseholdInvite(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -604,6 +747,29 @@ function HouseholdSettings() {
       setInviteCode(response.data.code);
       setEmail("");
       showToast("Invitation code created; it expires in 48 hours.");
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : String(caught);
+      setError(message);
+      showToast(message, "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function joinHousehold(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      const join = httpsCallable<{ code: string }, { status: "member"; householdId: string }>(
+        getCloudFunctions(),
+        "joinHousehold"
+      );
+      const response = await join({ code: joinCode.trim() });
+      setActiveKitchenId(response.data.householdId);
+      setJoinCode("");
+      setMembers(null);
+      showToast("Joined the household. Your previous personal household is retained.");
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : String(caught);
       setError(message);
@@ -631,19 +797,28 @@ function HouseholdSettings() {
   }
 
   if (members === null && !error) return <div className="settings-card"><p className="muted">Loading household members…</p></div>;
-  if (members?.length === 0 && !error) return null;
 
   return <section className="settings-card">
-    <h2>Household</h2>
-    <p className="muted">Invite a partner with a single-use code that expires after 48 hours.</p>
+    <h2>Join a household</h2>
+    <p className="muted">Enter an invitation code to switch from your personal household. Your personal data is retained.</p>
     {error && <p className="error" role="alert">{error}</p>}
-    <form className="item-form" onSubmit={(event) => void createHouseholdInvite(event)}>
-      <label>Email lock (optional)
-        <input type="email" value={email} onChange={(event) => setEmail(event.target.value)} />
+    <form className="item-form" onSubmit={(event) => void joinHousehold(event)}>
+      <label>Invitation code
+        <input autoComplete="one-time-code" value={joinCode} onChange={(event) => setJoinCode(event.target.value)} />
       </label>
-      <button className="button primary" disabled={busy}>Create invitation</button>
+      <button className="button primary" disabled={busy || !joinCode.trim()}>Join household</button>
     </form>
-    {inviteCode && <p className="success" role="status">Share this code with your partner; it is shown once: <strong>{inviteCode}</strong></p>}
+    {members?.some((member) => member.role === "owner") && <>
+      <h2>Your household</h2>
+      <p className="muted">Invite a partner with a single-use code that expires after 48 hours.</p>
+      <form className="item-form" onSubmit={(event) => void createHouseholdInvite(event)}>
+        <label>Email lock (optional)
+          <input type="email" value={email} onChange={(event) => setEmail(event.target.value)} />
+        </label>
+        <button className="button primary" disabled={busy}>Create invitation</button>
+      </form>
+      {inviteCode && <p className="success" role="status">Share this code with your partner; it is shown once: <strong>{inviteCode}</strong></p>}
+    </>}
     {members?.filter((member) => member.role !== "owner").map((member) => <div className="settings-row" key={member.uid}>
       <span>{member.displayName || "Kitchen member"}</span>
       <div className="actions">
@@ -664,6 +839,7 @@ function HouseholdSettings() {
 
 function App() {
   const { showToast } = useToast();
+  const activeKitchenId = useKitchenId();
   const location = useLocation();
   const [setupError, setSetupError] = useState<string | null>(null);
   const [authUser, setAuthUser] = useState<User | null>(null);
@@ -677,6 +853,7 @@ function App() {
       return onAuthStateChanged(getFirebaseAuth(), (user) => {
         setAuthUser(user);
         setMembershipStatus(user ? "checking" : "signedOut");
+        setActiveKitchenId(null);
         setAuthLoading(false);
         setAuthError(null);
       }, (error) => {
@@ -698,30 +875,37 @@ function App() {
     let active = true;
     setMembershipStatus("checking");
     try {
-      const bootstrap = httpsCallable<void, { status: "owner" | "member" | "private" }>(
-        getCloudFunctions(),
-        "bootstrapKitchen"
-      );
-      void bootstrap().then(({ data }) => {
+      void (async () => {
+        if (!authUser.emailVerified) {
+          throw new Error("Verify your Google account email before creating a household.");
+        }
+        await authUser.getIdToken(true);
+        const result = await bootstrapPersonalHousehold(getDatabase(), authUser.uid, {
+          displayName: authUser.displayName ?? "",
+          photoURL: authUser.photoURL ?? ""
+        });
+        return result.householdId;
+      })().then((householdId) => {
         if (active) {
-          setMembershipStatus(data.status === "owner" || data.status === "member" ? "member" : "private");
-          setAuthError(data.status === "private" ? "This app is private. Use an invitation code to join." : null);
+          setActiveKitchenId(householdId);
+          setMembershipStatus("member");
+          setAuthError(null);
         }
       }).catch((error: unknown) => {
         if (active) {
           setMembershipStatus("private");
-          setAuthError(error instanceof Error ? error.message : String(error));
+          setAuthError(householdBootstrapErrorMessage(error));
         }
       });
     } catch (error) {
       setMembershipStatus("private");
-      setAuthError(error instanceof Error ? error.message : String(error));
+      setAuthError(householdBootstrapErrorMessage(error));
     }
     return () => { active = false; };
   }, [authUser]);
 
   useEffect(() => {
-    if (!authUser || membershipStatus !== "member") {
+    if (!authUser || membershipStatus !== "member" || !activeKitchenId) {
       setSetupError(null);
       return;
     }
@@ -733,7 +917,7 @@ function App() {
       if (active) setSetupError(error instanceof Error ? error.message : String(error));
     });
     return () => { active = false; };
-  }, [authUser, membershipStatus]);
+  }, [authUser, membershipStatus, activeKitchenId]);
 
   async function continueWithGoogle() {
     setAuthBusy(true);
@@ -767,8 +951,9 @@ function App() {
     setAuthBusy(true);
     setAuthError(null);
     try {
-      const join = httpsCallable<{ code: string }, { status: "member" }>(getCloudFunctions(), "joinHousehold");
-      await join({ code });
+      const join = httpsCallable<{ code: string }, { status: "member"; householdId: string }>(getCloudFunctions(), "joinHousehold");
+      const { data } = await join({ code });
+      setActiveKitchenId(data.householdId);
       setMembershipStatus("member");
       setAuthError(null);
       showToast("Joined the kitchen.");
@@ -797,6 +982,7 @@ function App() {
     <header className="topbar">
       <Link to="/" className="brand"><span className="brand-mark">m</span><span>my kitchen</span></Link>
       <nav aria-label="Main navigation">{routes.map((route) => <Link className={location.pathname === route.path ? "active" : ""} key={route.path} to={route.path}>{route.label}</Link>)}</nav>
+      <NotificationsLink />
       <span className="account-email">{authUser.email}</span>
       <button className="button small secondary" onClick={() => void leaveKitchen()}>Sign out</button>
       <span className="online-mark"><i /> Live sync</span>
@@ -809,11 +995,12 @@ function App() {
         <Route path="/expenses" element={<ReceiptsPage />} />
         <Route path="/budgets" element={<BudgetsPage />} />
         <Route path="/insights" element={<InsightsPage />} />
+        <Route path="/notifications" element={<NotificationsPage />} />
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </main>
-    <footer>Made for a calmer kitchen <span>·</span> Changes sync live through Firestore</footer>
+    <footer>Made for a calmer kitchen <span>·</span> Changes sync live through Firestore <span>·</span> <a href="https://shoppingcart.at/privacy">Privacy</a> <span>·</span> <a href="https://shoppingcart.at/terms">Terms</a></footer>
   </div>;
 }
 

@@ -11,7 +11,13 @@ import {
 } from "firebase/auth";
 import { httpsCallable } from "firebase/functions";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
-import { ensureSettings } from "@my-kitchen/shared";
+import {
+  bootstrapPersonalHousehold,
+  ensureSettings,
+  householdBootstrapErrorMessage,
+  setActiveKitchenId
+} from "@my-kitchen/shared";
+import { useKitchenId } from "../src/useKitchenPath";
 import { getCloudFunctions, getDatabase, getFirebaseAuth } from "../src/firebase";
 import { PushStatusContext } from "../src/pushStatus";
 import { ToastProvider } from "../src/toast";
@@ -29,6 +35,7 @@ Notifications.setNotificationHandler({
 });
 
 export default function RootLayout() {
+  const activeKitchenId = useKitchenId();
   const [pushStatus, setPushStatus] = useState("Setting up push notifications…");
   const [authUser, setAuthUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
@@ -42,13 +49,14 @@ export default function RootLayout() {
       return onAuthStateChanged(getFirebaseAuth(), (user) => {
         setAuthUser(user);
         setMembershipStatus(user ? "checking" : "signedOut");
+        setActiveKitchenId(null);
         setAuthLoading(false);
       }, (error) => {
         setAuthError(error.message);
         setAuthLoading(false);
       });
     } catch (error) {
-      setAuthError(error instanceof Error ? error.message : String(error));
+      setAuthError(householdBootstrapErrorMessage(error));
       setAuthLoading(false);
       return undefined;
     }
@@ -59,24 +67,31 @@ export default function RootLayout() {
     let active = true;
     setMembershipStatus("checking");
     try {
-      const bootstrap = httpsCallable<void, { status: "owner" | "member" | "private" }>(
-        getCloudFunctions(),
-        "bootstrapKitchen"
-      );
-      void bootstrap().then(({ data }) => {
+      void (async () => {
+        if (!authUser.emailVerified) {
+          throw new Error("Verify your Google account email before creating a household.");
+        }
+        await authUser.getIdToken(true);
+        const result = await bootstrapPersonalHousehold(getDatabase(), authUser.uid, {
+          displayName: authUser.displayName ?? "",
+          photoURL: authUser.photoURL ?? ""
+        });
+        return result.householdId;
+      })().then((householdId) => {
         if (active) {
-          setMembershipStatus(data.status === "owner" || data.status === "member" ? "member" : "private");
-          setAuthError(data.status === "private" ? "This app is private. Join with an invitation code." : null);
+          setActiveKitchenId(householdId);
+          setMembershipStatus("member");
+          setAuthError(null);
         }
       }).catch((error: unknown) => {
         if (active) {
           setMembershipStatus("private");
-          setAuthError(error instanceof Error ? error.message : String(error));
+          setAuthError(householdBootstrapErrorMessage(error));
         }
       });
     } catch (error) {
       setMembershipStatus("private");
-      setAuthError(error instanceof Error ? error.message : String(error));
+      setAuthError(householdBootstrapErrorMessage(error));
     }
     return () => { active = false; };
   }, [authUser]);
@@ -100,8 +115,9 @@ export default function RootLayout() {
     setAuthBusy(true);
     setAuthError(null);
     try {
-      const join = httpsCallable<{ code: string }, { status: "member" }>(getCloudFunctions(), "joinHousehold");
-      await join({ code });
+      const join = httpsCallable<{ code: string }, { status: "member"; householdId: string }>(getCloudFunctions(), "joinHousehold");
+      const { data } = await join({ code });
+      setActiveKitchenId(data.householdId);
       setMembershipStatus("member");
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : String(error));
@@ -120,7 +136,7 @@ export default function RootLayout() {
   }, []);
 
   useEffect(() => {
-    if (!authUser || membershipStatus !== "member") return;
+    if (!authUser || membershipStatus !== "member" || !activeKitchenId) return;
     let active = true;
     const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
     void (async () => {
@@ -152,7 +168,7 @@ export default function RootLayout() {
       active = false;
       subscription.remove();
     };
-  }, [authUser, membershipStatus, router]);
+  }, [authUser, membershipStatus, router, activeKitchenId]);
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
@@ -160,7 +176,10 @@ export default function RootLayout() {
         <ToastProvider>
           {!authLoading && !(authUser && membershipStatus === "checking")
             && authUser && membershipStatus === "member"
-            ? <Stack screenOptions={{ headerShown: false }} />
+            ? <Stack screenOptions={{ headerShown: false }}>
+              <Stack.Screen name="(tabs)" />
+              <Stack.Screen name="notifications" options={{ headerShown: true, title: "Notifications", headerTintColor: "#26392e", headerStyle: { backgroundColor: "#ffffff" } }} />
+            </Stack>
             : <GoogleSignInScreen
               authLoading={authLoading}
               authBusy={authBusy}

@@ -3,6 +3,7 @@ import * as Device from "expo-device";
 import * as Notifications from "expo-notifications";
 import { Platform } from "react-native";
 import { doc, serverTimestamp, setDoc } from "firebase/firestore";
+import { getKitchenDocPath } from "@my-kitchen/shared";
 import { getDatabase, getFirebaseAuth } from "./firebase";
 
 const PUSH_NOTIFICATIONS_ENABLED = false;
@@ -37,7 +38,7 @@ export async function registerForPushNotifications(): Promise<string> {
   if (Platform.OS !== "ios" && Platform.OS !== "android") {
     return "Push registration is available on iOS and Android only.";
   }
-  await setDoc(doc(getDatabase(), "kitchen/main/devices", pushToken), {
+  await setDoc(doc(getDatabase(), `${getKitchenDocPath()}/devices`, pushToken), {
     platform: Platform.OS,
     uid,
     updatedAt: serverTimestamp()

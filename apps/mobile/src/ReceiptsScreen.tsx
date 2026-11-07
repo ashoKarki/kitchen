@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
   Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -12,8 +13,10 @@ import {
 } from "react-native";
 import * as ImageManipulator from "expo-image-manipulator";
 import * as ImagePicker from "expo-image-picker";
+import { Camera, CameraView } from "expo-camera";
 import * as FileSystem from "expo-file-system/legacy";
 import * as Sharing from "expo-sharing";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { httpsCallable } from "firebase/functions";
 import { useFocusEffect } from "expo-router";
 import RNPickerSelect from "react-native-picker-select";
@@ -30,11 +33,13 @@ import {
   getExpensePeriodBounds,
   getExpensePeriodLabel,
   formatCents,
+  formatQuantity,
   isUnreceiptedPurchase,
   unreceiptedPurchaseItems,
   isValidDateKey,
   isValidTime,
   parseEuroCents,
+  parseQuantity,
   receiptsToCsv,
   shiftExpensePeriod,
   summarizeExpenses,
@@ -58,6 +63,12 @@ interface ScanReceiptRequest {
   mimeType: "image/jpeg" | "image/png";
 }
 
+interface ReceiptImage {
+  uri: string;
+  width: number;
+  height: number;
+}
+
 function localDateKey(date = new Date()): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
@@ -79,8 +90,17 @@ export default function ReceiptsScreen() {
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod | "">("");
   const [lineItems, setLineItems] = useState<ReceiptLineItem[]>([]);
   const [lineAmountInputs, setLineAmountInputs] = useState<string[]>([]);
+  const [lineQuantityInputs, setLineQuantityInputs] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [scanning, setScanning] = useState(false);
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const [cameraReady, setCameraReady] = useState(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [capturing, setCapturing] = useState(false);
+  const cameraRef = useRef<CameraView>(null);
+  const captureInProgress = useRef(false);
+  const pendingCapture = useRef<ReceiptImage | null>(null);
+  const screenFocused = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [expandedReceipt, setExpandedReceipt] = useState<string | null>(null);
@@ -95,6 +115,15 @@ export default function ReceiptsScreen() {
     const timer = setInterval(() => setNow(Date.now()), 60_000);
     return () => clearInterval(timer);
   }, []);
+
+  useFocusEffect(useCallback(() => {
+    screenFocused.current = true;
+    return () => {
+      screenFocused.current = false;
+      setCameraOpen(false);
+      pendingCapture.current = null;
+    };
+  }, []));
 
   const parsedTotalCents = parseEuroCents(totalEuros);
   const totalCents = parsedTotalCents ?? 0;
@@ -152,6 +181,7 @@ export default function ReceiptsScreen() {
     setTotalEuros("");
     setPaymentMethod("");
     setLineItems(initialLineItems);
+    setLineQuantityInputs(initialLineItems.map((line) => formatQuantity(line.quantity)));
     setLineAmountInputs(initialLineItems.map((line) => line.amountCents > 0 ? (line.amountCents / 100).toFixed(2) : ""));
     setError(null);
     setNotice(items.error
@@ -170,7 +200,7 @@ export default function ReceiptsScreen() {
     });
   }
 
-  async function scanAsset(asset: ImagePicker.ImagePickerAsset) {
+  async function scanAsset(asset: ReceiptImage) {
     if (scanning) return;
     setReceiptPurchaseItemIds(selectedPurchaseItemIds);
     setScanning(true);
@@ -208,6 +238,7 @@ export default function ReceiptsScreen() {
       setTotalEuros((result.data.totalCents / 100).toFixed(2));
       setPaymentMethod(result.data.paymentMethod ?? "");
       setLineItems(result.data.lineItems);
+      setLineQuantityInputs(result.data.lineItems.map((line) => formatQuantity(line.quantity)));
       setLineAmountInputs(result.data.lineItems.map((line) => (line.amountCents / 100).toFixed(2)));
       setNotice(scannedDuplicate
         ? "This receipt appears to have already been saved. Check existing expenses before saving to avoid a duplicate."
@@ -228,20 +259,16 @@ export default function ReceiptsScreen() {
     }
   }
 
-  async function chooseImage(useCamera: boolean) {
+  async function chooseImage() {
     try {
-      const permission = useCamera
-        ? await ImagePicker.requestCameraPermissionsAsync()
-        : await ImagePicker.requestMediaLibraryPermissionsAsync();
+      const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (!permission.granted) {
-        const message = useCamera ? "Camera permission is needed to photograph a receipt." : "Photo library permission is needed to choose a receipt.";
+        const message = "Photo library permission is needed to choose a receipt.";
         setError(message);
         showToast(message, "error");
         return;
       }
-      const result = useCamera
-        ? await ImagePicker.launchCameraAsync({ mediaTypes: ["images"], allowsEditing: false, quality: 1 })
-        : await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], allowsEditing: false, quality: 1 });
+      const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], allowsEditing: false, quality: 1 });
       if (result.canceled) return;
       const asset = result.assets[0];
       if (!asset) {
@@ -257,12 +284,57 @@ export default function ReceiptsScreen() {
     }
   }
 
+  async function openCamera() {
+    try {
+      const permission = await Camera.requestCameraPermissionsAsync();
+      if (!screenFocused.current) return;
+      if (!permission.granted) {
+        const message = "Camera permission is needed to photograph a receipt. Allow it in your device settings, or choose a photo.";
+        setError(message);
+        showToast(message, "error");
+        return;
+      }
+      setCameraReady(false);
+      setCameraError(null);
+      setCameraOpen(true);
+    } catch (caught) {
+      const message = `Could not open the camera: ${caught instanceof Error ? caught.message : String(caught)}`;
+      setError(message);
+      showToast(message, "error");
+    }
+  }
+
+  function scanPendingCapture() {
+    const image = pendingCapture.current;
+    pendingCapture.current = null;
+    if (image) void scanAsset(image);
+  }
+
+  async function captureReceipt() {
+    if (!cameraReady || !cameraRef.current || captureInProgress.current) return;
+    captureInProgress.current = true;
+    setCapturing(true);
+    try {
+      const image = await cameraRef.current.takePictureAsync({ quality: 1 });
+      if (!screenFocused.current) return;
+      if (!image?.uri || !image.width || !image.height) throw new Error("The captured image could not be loaded.");
+      pendingCapture.current = image;
+      setCameraOpen(false);
+      if (Platform.OS !== "ios") scanPendingCapture();
+    } catch (caught) {
+      setCameraError(`Could not capture the receipt: ${caught instanceof Error ? caught.message : String(caught)}`);
+    } finally {
+      captureInProgress.current = false;
+      setCapturing(false);
+    }
+  }
+
   function openScanner() {
     setError(null);
     Alert.alert("Scan a receipt", "Choose how to add the receipt image.", [
       { text: "Cancel", style: "cancel" },
-      { text: "Take photo", onPress: () => { void chooseImage(true); } },
-      { text: "Choose photo", onPress: () => { void chooseImage(false); } }
+      { text: "Take photo", onPress: () => { void openCamera(); } },
+      { text: "Choose photo", onPress: () => { void chooseImage(); } }
     ]);
   }
 
@@ -303,6 +375,7 @@ export default function ReceiptsScreen() {
     setTotalEuros((receipt.totalCents / 100).toFixed(2));
     setPaymentMethod(receipt.paymentMethod ?? "");
     setLineItems(receipt.lineItems.map((line) => ({ ...line })));
+    setLineQuantityInputs(receipt.lineItems.map((line) => formatQuantity(line.quantity)));
     setLineAmountInputs(receipt.lineItems.map((line) => (line.amountCents / 100).toFixed(2)));
     setError(null);
     setNotice(null);
@@ -338,6 +411,13 @@ export default function ReceiptsScreen() {
     if (lineItems.length === 0 || lineItems.some((line) => !line.name.trim())) {
       setError("Add a name for every receipt line.");
       showToast("Add a name for every receipt line.", "error");
+      return;
+    }
+    if (lineItems.some((_, index) => {
+      const quantity = parseQuantity(lineQuantityInputs[index] ?? "");
+      return quantity === null || quantity === 0;
+    })) {
+      setError("Enter a quantity above 0 and up to 9999, with at most 9 decimal places for every receipt line.");
       return;
     }
     setBusy(true);
@@ -486,7 +566,7 @@ export default function ReceiptsScreen() {
                   style={styles.purchaseItemOption}
                 >
                   <Text style={styles.purchaseItemCheck}>{selected ? "☑" : "□"}</Text>
-                  <Text style={styles.purchaseItemName}>{item.name} ×{item.quantity}</Text>
+                  <Text style={styles.purchaseItemName}>{item.name} ×{formatQuantity(item.quantity)}</Text>
                   <Text style={styles.purchaseItemTime}>{item.boughtAt?.toDate().toLocaleTimeString() ?? "Purchased"}</Text>
                 </Pressable>
               );
@@ -576,7 +656,7 @@ export default function ReceiptsScreen() {
               {receipt.lineItems.map((line, index) => (
                 <View key={`${line.name}-${index}`} style={styles.receiptLine}>
                   <View style={{ flex: 1 }}>
-                    <Text style={styles.lineName}>{line.name} ×{line.quantity}</Text>
+                    <Text style={styles.lineName}>{line.name} ×{formatQuantity(line.quantity)}</Text>
                     <Text style={styles.lineMeta}>{line.category}</Text>
                   </View>
                   <Text style={styles.lineAmount}>{formatCents(line.amountCents)}</Text>
@@ -636,7 +716,11 @@ export default function ReceiptsScreen() {
                   <Text style={styles.label}>Item {index + 1}</Text>
                   <TextInput accessibilityLabel={`Line ${index + 1} name`} onChangeText={(name) => updateLineName(index, name)} placeholder="Item name" style={styles.input} value={line.name} />
                   <View style={styles.lineInputRow}>
-                    <TextInput accessibilityLabel={`Line ${index + 1} quantity`} keyboardType="number-pad" onChangeText={(value) => updateLine(index, { quantity: Math.max(1, Number(value) || 1) })} placeholder="Qty" style={[styles.input, styles.flexInput]} value={String(line.quantity)} />
+                    <TextInput accessibilityLabel={`Line ${index + 1} quantity`} keyboardType="decimal-pad" onChangeText={(value) => {
+                      setLineQuantityInputs((current) => current.map((entry, entryIndex) => entryIndex === index ? value : entry));
+                      const quantity = parseQuantity(value);
+                      if (quantity !== null && quantity > 0) updateLine(index, { quantity });
+                    }} placeholder="Qty" style={[styles.input, styles.flexInput]} value={lineQuantityInputs[index] ?? ""} />
                     <TextInput accessibilityLabel={`Line ${index + 1} amount in euros`} keyboardType="decimal-pad" onChangeText={(value) => updateLineAmount(index, value)} onEndEditing={() => setLineAmountInputs((current) => current.map((amount, amountIndex) => amountIndex === index ? ((lineItems[index]?.amountCents ?? 0) / 100).toFixed(2) : amount))} placeholder="€ amount" style={[styles.input, styles.flexInput]} value={lineAmountInputs[index] ?? ""} />
                   </View>
                   <Text style={styles.label}>Category</Text>
@@ -674,6 +758,7 @@ export default function ReceiptsScreen() {
                   rawName: "", name: "", quantity: 1, amountCents: 0, category: "Groceries", necessity: "essential"
                 }]);
                 setLineAmountInputs((current) => [...current, ""]);
+                setLineQuantityInputs((current) => [...current, "1"]);
               }} style={[styles.lineAction, styles.addLineButton]}>
                 <Text style={[styles.lineActionText, styles.addLineText]}>＋  Add line</Text>
               </Pressable>
@@ -687,6 +772,43 @@ export default function ReceiptsScreen() {
         </View>
       </Modal>
     </ScrollView>
+    <Modal
+      animationType="slide"
+      visible={cameraOpen}
+      onRequestClose={() => { if (!captureInProgress.current) setCameraOpen(false); }}
+      onDismiss={scanPendingCapture}
+    >
+      <SafeAreaView style={styles.cameraScreen}>
+        <View style={styles.cameraHeader}>
+          <Text style={styles.cameraTitle}>Align your receipt</Text>
+          <Text style={styles.cameraHint}>Fit the full bill inside the guide. Keep it flat and avoid glare.</Text>
+        </View>
+        <View style={styles.cameraPreview}>
+          {cameraOpen && <CameraView
+            ref={cameraRef}
+            style={StyleSheet.absoluteFill}
+            facing="back"
+            onCameraReady={() => setCameraReady(true)}
+            onMountError={({ message }) => {
+              setCameraReady(false);
+              setCameraError(`Could not start the camera: ${message}`);
+            }}
+          />}
+          <View pointerEvents="none" style={styles.cameraGuide}>
+            <View style={styles.cameraReceiptGuide} />
+          </View>
+        </View>
+        {cameraError && <Text accessibilityRole="alert" style={styles.cameraError}>{cameraError}</Text>}
+        <View style={styles.cameraActions}>
+          <Pressable accessibilityRole="button" disabled={capturing} onPress={() => setCameraOpen(false)} style={styles.secondaryButton}>
+            <Text style={styles.secondaryText}>Cancel</Text>
+          </Pressable>
+          <Pressable accessibilityRole="button" accessibilityState={{ disabled: !cameraReady || capturing }} disabled={!cameraReady || capturing} onPress={() => void captureReceipt()} style={[styles.primaryButton, (!cameraReady || capturing) && styles.disabledActionButton]}>
+            <Text style={styles.primaryText}>{capturing ? "Capturing…" : "Capture & scan"}</Text>
+          </Pressable>
+        </View>
+      </SafeAreaView>
+    </Modal>
     <Modal
       animationType="fade"
       onRequestClose={() => {}}
@@ -710,6 +832,15 @@ const styles = StyleSheet.create({
   scanningOverlay: { flex: 1, alignItems: "center", justifyContent: "center", gap: 12, backgroundColor: "rgba(245,248,242,0.92)" },
   scanningTitle: { color: "#2e4035", fontSize: 16, fontWeight: "700" },
   scanningHint: { color: "#748078", fontSize: 12 },
+  cameraScreen: { flex: 1, backgroundColor: "#fff", padding: 18 },
+  cameraHeader: { gap: 5, paddingBottom: 14 },
+  cameraTitle: { color: "#2e4035", fontSize: 17, fontWeight: "700" },
+  cameraHint: { color: "#748078", fontSize: 12 },
+  cameraPreview: { flex: 1, overflow: "hidden", borderRadius: 12, backgroundColor: "#101612" },
+  cameraGuide: { position: "absolute", top: "5%", bottom: "5%", left: "12%", right: "12%", borderWidth: 2, borderColor: "rgba(255,255,255,0.9)", borderRadius: 12, alignItems: "center", justifyContent: "center" },
+  cameraReceiptGuide: { height: "84%", maxWidth: "90%", aspectRatio: 0.48, borderWidth: 2, borderStyle: "dashed", borderColor: "rgba(255,255,255,0.75)", borderRadius: 5 },
+  cameraError: { color: "#a33f37", marginTop: 10 },
+  cameraActions: { flexDirection: "row", justifyContent: "flex-end", gap: 9, paddingTop: 14 },
   heading: { flexDirection: "row", alignItems: "center", marginBottom: 14 },
   eyebrow: { color: "#7e9c88", fontSize: 10, fontWeight: "700", letterSpacing: 1.4 },
   title: { color: "#26392e", fontSize: 29, fontWeight: "800", marginTop: 4 },

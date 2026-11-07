@@ -165,7 +165,7 @@ function SignInCard({
         <Text style={styles.description}>
           Sign in with Google to access your pantry and spending data.
         </Text>
-        {privateAccess && <Text style={styles.error}>This app is private. Join with a single-use invitation code.</Text>}
+        {privateAccess && <Text style={styles.error}>Set up your household, or join an existing one with an invitation code.</Text>}
         {error && <Text accessibilityRole="alert" style={styles.error}>{error}</Text>}
         {setupMessage && (
           <Text accessibilityRole="alert" style={styles.error}>

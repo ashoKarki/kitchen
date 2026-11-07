@@ -1,5 +1,6 @@
 import { initializeApp } from "firebase-admin/app";
 import { dailyKitchenReminder } from "./reminder.js";
+import { purgeExpiredItems } from "./deletedItems.js";
 import { scanReceipt } from "./scanReceipt.js";
 import { generateInsights } from "./generateInsights.js";
 import {
@@ -17,6 +18,7 @@ import {
   evaluateBudgetAfterMemberSettingsChange,
   evaluateBudgetAfterReceiptChange,
   evaluateBudgetAfterSettingsChange,
+  refreshBudgetAlerts,
   sendBudgetAlertPush
 } from "./budgetAlerts.js";
 
@@ -35,6 +37,8 @@ export {
   joinHousehold,
   leaveHousehold,
   listHouseholdMembers,
+  purgeExpiredItems,
+  refreshBudgetAlerts,
   removeHouseholdMember,
   scanReceipt,
   sendBudgetAlertPush,

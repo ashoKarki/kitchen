@@ -24,9 +24,14 @@ export function requireVerifiedUser(request: CallableRequest<unknown>): {
 
 export async function requireMember(
   request: CallableRequest<unknown>
-): Promise<{ uid: string; email: string; role: KitchenRole }> {
+): Promise<{ uid: string; email: string; role: KitchenRole; householdId: string }> {
   const user = requireVerifiedUser(request);
-  const snapshot = await getFirestore().doc("kitchen/main").get();
+  const account = await getFirestore().doc(`userAccounts/${user.uid}`).get();
+  const householdId: unknown = account.get("householdId");
+  if (!account.exists || typeof householdId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(householdId)) {
+    throw new HttpsError("permission-denied", "This account does not have an active household.");
+  }
+  const snapshot = await getFirestore().doc(`kitchen/${householdId}`).get();
   const members: unknown = snapshot.get("members");
   if (typeof members !== "object" || members === null || Array.isArray(members)) {
     throw new HttpsError("permission-denied", "This app is private.");
@@ -35,15 +40,20 @@ export async function requireMember(
   if (role !== "owner" && role !== "member") {
     throw new HttpsError("permission-denied", "This account is not a member of this kitchen.");
   }
-  return { ...user, role };
+  return { ...user, role, householdId };
 }
 
 export async function requireOwner(
   request: CallableRequest<unknown>
-): Promise<{ uid: string; email: string; role: "owner" }> {
+): Promise<{ uid: string; email: string; role: "owner"; householdId: string }> {
   const member = await requireMember(request);
   if (member.role !== "owner") {
     throw new HttpsError("permission-denied", "Only the kitchen owner can perform this action.");
   }
-  return { uid: member.uid, email: member.email, role: "owner" };
+  return {
+    uid: member.uid,
+    email: member.email,
+    role: "owner",
+    householdId: member.householdId
+  };
 }

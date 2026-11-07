@@ -145,7 +145,7 @@ export default function BudgetsPage() {
 
   return <section className="page">
     <div className="page-heading">
-      <div><p className="eyebrow">PLAN YOUR SPENDING</p><h1>Budgets</h1><p className="muted">Track weekly or monthly spending and receive alerts at 80% and 100%.</p></div>
+      <div><p className="eyebrow">PLAN YOUR SPENDING</p><h1>Budgets</h1><p className="muted">Track weekly or monthly spending. Alerts begin at 70% and continue as spending increases.</p></div>
       <button className="button primary" onClick={() => openEditor()}>＋ Add budget</button>
     </div>
     {notice && <p className="success" role="status">{notice}</p>}
@@ -198,7 +198,7 @@ export default function BudgetsPage() {
     </div>
 
     <div className="budget-alert-heading"><div><p className="eyebrow">BUDGET ACTIVITY</p><h2>Alerts</h2></div><span className="muted">{alerts.data?.filter(({ alert }) => !alert.read).length ?? 0} unread</span></div>
-    {!alerts.data?.length ? <div className="empty"><h2>No budget alerts</h2><p>Alerts appear here when an active budget reaches 80% or 100%.</p></div>
+    {!alerts.data?.length ? <div className="empty"><h2>No budget alerts</h2><p>Alerts appear here when an active budget reaches a warning threshold, starting at 70%.</p></div>
       : <div className="budget-alert-list">
         {[...alerts.data].sort((a, b) => b.alert.createdAt.toMillis() - a.alert.createdAt.toMillis()).map(({ id, alert }) => (
           <article className={`budget-alert${alert.read ? "" : " unread"}`} key={id}>

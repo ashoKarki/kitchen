@@ -2,12 +2,13 @@ import { useEffect, useState } from "react";
 import { collection, onSnapshot, Timestamp } from "firebase/firestore";
 import {
   expenseCategories,
-  KITCHEN_DOC_PATH,
+  getKitchenDocPath,
   type Budget,
   type BudgetAlert
 } from "@my-kitchen/shared";
 import { z } from "zod";
 import { getDatabase } from "./firebase";
+import { useKitchenId } from "./useKitchenPath";
 
 const budgetScopeSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("overall") }),
@@ -40,13 +41,20 @@ const alertSchema = z.object({
 });
 
 export function useBudgets() {
+  const kitchenId = useKitchenId();
   const [data, setData] = useState<Array<{ id: string; budget: Budget }> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    setData(null);
+    setLoading(true);
+    if (!kitchenId) {
+      setLoading(false);
+      return undefined;
+    }
     try {
-      return onSnapshot(collection(getDatabase(), `${KITCHEN_DOC_PATH}/budgets`), (snapshot) => {
+      return onSnapshot(collection(getDatabase(), `${getKitchenDocPath()}/budgets`), (snapshot) => {
         try {
           setData(snapshot.docs.map((entry) => ({
             id: entry.id,
@@ -69,19 +77,26 @@ export function useBudgets() {
       setLoading(false);
       return undefined;
     }
-  }, []);
+  }, [kitchenId]);
 
   return { data, error, loading };
 }
 
 export function useBudgetAlerts() {
+  const kitchenId = useKitchenId();
   const [data, setData] = useState<Array<{ id: string; alert: BudgetAlert }> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    setData(null);
+    setLoading(true);
+    if (!kitchenId) {
+      setLoading(false);
+      return undefined;
+    }
     try {
-      return onSnapshot(collection(getDatabase(), `${KITCHEN_DOC_PATH}/alerts`), (snapshot) => {
+      return onSnapshot(collection(getDatabase(), `${getKitchenDocPath()}/alerts`), (snapshot) => {
         try {
           setData(snapshot.docs.map((entry) => ({
             id: entry.id,
@@ -104,7 +119,7 @@ export function useBudgetAlerts() {
       setLoading(false);
       return undefined;
     }
-  }, []);
+  }, [kitchenId]);
 
   return { data, error, loading };
 }

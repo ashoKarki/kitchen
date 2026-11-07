@@ -6,19 +6,22 @@ import {
   Timestamp,
   type Firestore
 } from "firebase/firestore";
-import { ensureSettings, KITCHEN_DOC_PATH, memberSettingsDocument, expenseCategories } from "@my-kitchen/shared";
+import { ensureSettings, getKitchenDocPath, memberSettingsDocument, expenseCategories } from "@my-kitchen/shared";
 import type { KitchenItem, KitchenSettings, Receipt } from "@my-kitchen/shared";
 import { z } from "zod";
 import { getDatabase, getFirebaseAuth } from "./firebase";
+import { useKitchenId } from "./useKitchenPath";
 
 const itemSchema = z.object({
   name: z.string().min(1).max(100),
-  quantity: z.number().int().min(0).max(9999),
+  quantity: z.number().min(0).max(9999),
+  stockBaseline: z.number().min(0).max(9999).optional(),
   category: z.enum(expenseCategories),
   state: z.enum(["inStock", "finished", "toBuy"]),
   bought: z.boolean().optional(),
   boughtAt: z.instanceof(Timestamp).nullable().optional(),
   receiptRecorded: z.boolean().optional(),
+  deletedAt: z.instanceof(Timestamp).optional(),
   createdAt: z.instanceof(Timestamp),
   updatedAt: z.instanceof(Timestamp)
 });
@@ -48,7 +51,7 @@ function readMemberSettings(value: unknown): Partial<Pick<KitchenSettings, "remi
 const lineItemSchema = z.object({
   rawName: z.string(),
   name: z.string(),
-  quantity: z.number().int(),
+  quantity: z.number(),
   amountCents: z.number().int(),
   category: z.enum(expenseCategories),
   necessity: z.enum(["essential", "discretionary", "neutral"]),
@@ -80,6 +83,7 @@ function database(): Firestore {
 }
 
 export function useItems(): LiveData<Array<{ id: string; item: KitchenItem }>> {
+  const kitchenId = useKitchenId();
   const [state, setState] = useState<LiveData<Array<{ id: string; item: KitchenItem }>>>({
     data: null,
     loading: true,
@@ -87,10 +91,12 @@ export function useItems(): LiveData<Array<{ id: string; item: KitchenItem }>> {
   });
 
   useEffect(() => {
+    setState({ data: null, loading: !kitchenId, error: null });
+    if (!kitchenId) return undefined;
     let unsubscribe: (() => void) | undefined;
     try {
       unsubscribe = onSnapshot(
-        collection(database(), `${KITCHEN_DOC_PATH}/items`),
+        collection(database(), `${getKitchenDocPath()}/items`),
         (snapshot) => {
           try {
             const data = snapshot.docs.map((entry) => {
@@ -124,11 +130,12 @@ export function useItems(): LiveData<Array<{ id: string; item: KitchenItem }>> {
       });
     }
     return () => unsubscribe?.();
-  }, []);
+  }, [kitchenId]);
   return state;
 }
 
 export function useSettings(): LiveData<KitchenSettings> {
+  const kitchenId = useKitchenId();
   const [state, setState] = useState<LiveData<KitchenSettings>>({
     data: null,
     loading: true,
@@ -138,6 +145,8 @@ export function useSettings(): LiveData<KitchenSettings> {
   const memberUid = getFirebaseAuth().currentUser?.uid;
 
   useEffect(() => {
+    setState({ data: null, loading: !kitchenId, error: null });
+    if (!kitchenId) return undefined;
     const unsubscribers: Array<() => void> = [];
     let cancelled = false;
     let kitchenSettings: KitchenSettings | null = null;
@@ -158,7 +167,7 @@ export function useSettings(): LiveData<KitchenSettings> {
         await ensureSettings(db, timeZone);
         if (cancelled) return;
         unsubscribers.push(onSnapshot(
-          doc(db, KITCHEN_DOC_PATH),
+          doc(db, getKitchenDocPath()),
           (snapshot) => {
             try {
               kitchenSettings = settingsSchema.parse(snapshot.data());
@@ -206,21 +215,24 @@ export function useSettings(): LiveData<KitchenSettings> {
       cancelled = true;
       for (const unsubscribe of unsubscribers) unsubscribe();
     };
-  }, [memberUid]);
+  }, [memberUid, kitchenId]);
   return state;
 }
 
 export function useReceipts(): LiveData<Array<{ id: string; receipt: Receipt }>> {
+  const kitchenId = useKitchenId();
   const [state, setState] = useState<LiveData<Array<{ id: string; receipt: Receipt }>>>({
     data: null,
     loading: true,
     error: null
   });
   useEffect(() => {
+    setState({ data: null, loading: !kitchenId, error: null });
+    if (!kitchenId) return undefined;
     let unsubscribe: (() => void) | undefined;
     try {
       unsubscribe = onSnapshot(
-        collection(database(), `${KITCHEN_DOC_PATH}/receipts`),
+        collection(database(), `${getKitchenDocPath()}/receipts`),
         (snapshot) => {
           try {
             const data = snapshot.docs.map((entry) => ({
@@ -246,6 +258,6 @@ export function useReceipts(): LiveData<Array<{ id: string; receipt: Receipt }>>
       });
     }
     return () => unsubscribe?.();
-  }, []);
+  }, [kitchenId]);
   return state;
 }

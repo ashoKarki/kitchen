@@ -1,0 +1,18 @@
+{
+  "name": "My Kitchen",
+  "short_name": "My Kitchen",
+  "description": "A calmer place for your pantry, shopping list and household spending.",
+  "start_url": "/app",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f5f8f2",
+  "theme_color": "#f5f8f2",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

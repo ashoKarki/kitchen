@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  Animated,
+  Alert,
   Keyboard,
   KeyboardAvoidingView,
   Modal,
@@ -10,22 +10,29 @@ import {
   StyleSheet,
   Text,
   TextInput,
-  useWindowDimensions,
   View
 } from "react-native";
-import ReanimatedSwipeable, { SwipeDirection } from "react-native-gesture-handler/ReanimatedSwipeable";
+import ReanimatedSwipeable, { SwipeDirection, type SwipeableMethods } from "react-native-gesture-handler/ReanimatedSwipeable";
 import RNPickerSelect from "react-native-picker-select";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import NotificationsButton from "./NotificationsButton";
 import { pickerSelectStyle } from "./pickerStyles";
 import { useToast } from "./toast";
 import {
   createItem,
-  completeShoppingList,
+  adjustItemQuantity,
   deleteItem,
   expenseCategories,
-  itemsForPurchaseCompletion,
+  filterItemsByName,
+  formatQuantity,
   itemsForView,
+  recentlyDeletedItems,
+  itemUndoMilliseconds,
+  parseQuantity,
   setItemBought,
+  stockWarning,
   updateItem,
+  undoDeleteItem,
   type ExpenseCategory,
   type ItemState,
   type KitchenItem,
@@ -45,20 +52,20 @@ function ItemForm({
 }) {
   const { showToast } = useToast();
   const [name, setName] = useState(existing?.item.name ?? "");
-  const [quantity, setQuantity] = useState(String(existing?.item.quantity ?? 1));
+  const [quantity, setQuantity] = useState(formatQuantity(existing?.item.quantity ?? 1));
   const [category, setCategory] = useState<ExpenseCategory>(existing?.item.category ?? "Other");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const minimumQuantity = existing && existing.item.state !== "toBuy" ? 0 : state === "toBuy" ? 1 : 0;
+  const allowsZero = existing ? existing.item.state !== "toBuy" : state !== "toBuy";
 
   async function save() {
-    const parsedQuantity = Number(quantity);
+    const parsedQuantity = parseQuantity(quantity);
     if (!name.trim()) {
       setError("Enter an item name.");
       return;
     }
-    if (!Number.isInteger(parsedQuantity) || parsedQuantity < minimumQuantity || parsedQuantity > 9999) {
-      setError(`Quantity must be a whole number between ${minimumQuantity} and 9999.`);
+    if (parsedQuantity === null || (!allowsZero && parsedQuantity === 0)) {
+      setError(`Quantity must be ${allowsZero ? "at least" : "greater than"} 0 and at most 9999, with up to 9 decimal places.`);
       return;
     }
 
@@ -68,13 +75,17 @@ function ItemForm({
       name: name.trim(),
       quantity: parsedQuantity,
       category,
-      state
+      state: state === "inStock" && parsedQuantity === 0 ? "finished" : state
     };
     try {
       if (existing) {
         await updateItem(getDatabase(), existing.id, {
           name: newItem.name,
           quantity: newItem.quantity,
+          ...(existing.item.state !== "toBuy" ? {
+            stockBaseline: newItem.quantity > existing.item.quantity ? newItem.quantity : (existing.item.stockBaseline ?? existing.item.quantity),
+            ...(newItem.quantity !== existing.item.quantity ? { state: newItem.quantity === 0 ? "finished" : "inStock" } : {})
+          } : {}),
           category: newItem.category,
           bought: false,
           boughtAt: null,
@@ -109,7 +120,7 @@ function ItemForm({
       <Text style={styles.label}>Quantity</Text>
       <TextInput
         accessibilityLabel="Quantity"
-        keyboardType="number-pad"
+        keyboardType="decimal-pad"
         onChangeText={setQuantity}
         style={styles.input}
         value={quantity}
@@ -146,6 +157,7 @@ function InventoryItemRow({
   onFinish,
   onBought,
   onRestock,
+  onAdjust,
   onDelete
 }: {
   item: KitchenItem;
@@ -154,61 +166,56 @@ function InventoryItemRow({
   onFinish: () => void;
   onBought: (bought: boolean) => void;
   onRestock: () => void;
+  onAdjust: (direction: "add" | "subtract") => void;
   onDelete: () => Promise<void>;
 }) {
-  const { width } = useWindowDimensions();
-  const deleteOffset = useRef(new Animated.Value(0)).current;
+  const swipeRef = useRef<SwipeableMethods>(null);
   const [deleting, setDeleting] = useState(false);
-  const opacity = deleteOffset.interpolate({
-    inputRange: [-width, 0],
-    outputRange: [0, 1],
-    extrapolate: "clamp"
-  });
+  const warning = shopping ? null : stockWarning(item);
 
   function triggerDelete() {
     if (deleting) return;
-    setDeleting(true);
-    Animated.timing(deleteOffset, {
-      toValue: -width,
-      duration: 220,
-      useNativeDriver: true
-    }).start(({ finished }) => {
-      if (!finished) return;
-      void onDelete().catch(() => {
-        setDeleting(false);
-        Animated.spring(deleteOffset, {
-          toValue: 0,
-          useNativeDriver: true
-        }).start();
-      });
-    });
+    swipeRef.current?.close();
+    Alert.alert("Delete item?", `Delete ${item.name}? You can undo this for one minute.`, [
+      { text: "Cancel", style: "cancel" },
+      { text: "Delete", style: "destructive", onPress: () => {
+        setDeleting(true);
+        void onDelete().catch(() => setDeleting(false));
+      } }
+    ]);
   }
 
   return (
     <ReanimatedSwipeable
+      ref={swipeRef}
       enabled={!deleting}
-      friction={2}
+      friction={2.5}
+      dragOffsetFromLeft={15}
+      dragOffsetFromRight={-15}
       leftThreshold={40}
       onSwipeableOpen={(direction) => {
         if (direction === SwipeDirection.LEFT) {
           triggerDelete();
-        } else if (!shopping) {
-          onRestock();
+        } else {
+          swipeRef.current?.close();
+          if (shopping) onBought(item.bought !== true);
+          else onRestock();
         }
       }}
       overshootLeft={false}
       overshootRight={false}
-      renderLeftActions={(_progress, _translation, methods) => shopping ? null : (
+      renderLeftActions={(_progress, _translation, methods) => (
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={`Restock ${item.name}`}
+            accessibilityLabel={shopping ? `${item.bought ? "Reset purchase of" : "Mark as purchased"} ${item.name}` : `Restock ${item.name}`}
             onPress={() => {
               methods.close();
-              onRestock();
+              if (shopping) onBought(item.bought !== true);
+              else onRestock();
             }}
             style={[styles.swipeAction, styles.restockAction]}
           >
-            <Text style={styles.swipeActionText}>Restock</Text>
+            <Text style={styles.swipeActionText}>{shopping ? item.bought ? "Reset" : "Purchased" : "Restock"}</Text>
           </Pressable>
         )}
       renderRightActions={() => (
@@ -224,15 +231,14 @@ function InventoryItemRow({
       rightThreshold={40}
       containerStyle={styles.swipeContainer}
     >
-      <Animated.View
+      <View
         accessibilityHint={shopping
-          ? "Swipe left to reveal delete."
+          ? "Swipe right to mark or reset purchase, or left to delete."
           : "Swipe right to reveal restock or left to reveal delete."}
         style={[
           styles.itemCard,
-          !shopping && item.quantity === 1 && styles.stockCriticalCard,
-          !shopping && item.quantity !== 1 && item.quantity <= 3 && styles.stockLowCard,
-          { opacity, transform: [{ translateX: deleteOffset }] }
+          warning === "critical" && styles.stockCriticalCard,
+          warning === "low" && styles.stockLowCard
         ]}
       >
         {shopping && (
@@ -246,40 +252,47 @@ function InventoryItemRow({
             <Text style={styles.checkText}>{item.bought ? "☒" : "□"}</Text>
           </Pressable>
         )}
-        <Pressable accessibilityRole="button" onPress={onEdit} style={styles.itemText}>
+        <Pressable accessibilityRole="button" onPress={onEdit} style={[styles.itemText, !shopping && styles.pantryItemText]}>
           <Text style={[
             styles.itemName,
             shopping && item.bought && styles.boughtItemName,
-            !shopping && item.quantity <= 3 && styles.stockCardText
+            warning && styles.stockCardText
           ]}>{item.name}</Text>
           <Text style={[
             styles.itemDetail,
             shopping && item.bought && styles.boughtItemName,
-            !shopping && item.quantity <= 3 && styles.stockCardText
+            warning && styles.stockCardText
           ]}>
-            Qty {item.quantity} · {item.category}
+            Qty {formatQuantity(item.quantity)} · {item.category}{warning ? ` · ${warning === "critical" ? "Critical stock" : "Low stock"}` : ""}
           </Text>
         </Pressable>
         {item.state === "finished" && (
-          <Text style={[styles.finished, !shopping && item.quantity <= 3 && styles.stockCardFinished]}>
+          <Text style={[styles.finished, warning && styles.stockCardFinished]}>
             Finished
           </Text>
         )}
+        {!shopping && <Pressable accessibilityRole="button" accessibilityLabel={`Subtract from ${item.name}`} onPress={() => onAdjust("subtract")} style={[styles.smallButton, warning && styles.stockCardButton]}>
+          <Text style={[styles.smallButtonText, warning && styles.stockCardText]}>−</Text>
+        </Pressable>}
+        {!shopping && <Pressable accessibilityRole="button" accessibilityLabel={`Add to ${item.name}`} onPress={() => onAdjust("add")} style={[styles.smallButton, warning && styles.stockCardButton]}>
+          <Text style={[styles.smallButtonText, warning && styles.stockCardText]}>＋</Text>
+        </Pressable>}
         {!shopping && item.state === "inStock" && (
           <Pressable
             accessibilityRole="button"
             onPress={onFinish}
-            style={[styles.smallButton, item.quantity <= 3 && styles.stockCardButton]}
+            style={[styles.smallButton, warning && styles.stockCardButton]}
           >
-            <Text style={[styles.smallButtonText, item.quantity <= 3 && styles.stockCardText]}>Mark finished</Text>
+            <Text style={[styles.smallButtonText, warning && styles.stockCardText]}>Mark finished</Text>
           </Pressable>
         )}
-      </Animated.View>
+      </View>
     </ReanimatedSwipeable>
   );
 }
 
 export default function InventoryScreen({ shopping = false }: { shopping?: boolean }) {
+  const insets = useSafeAreaInsets();
   const { showToast } = useToast();
   const { data: items, error, loading } = useItems();
   const [now, setNow] = useState(() => new Date());
@@ -289,10 +302,17 @@ export default function InventoryScreen({ shopping = false }: { shopping?: boole
   const [restockQuantity, setRestockQuantity] = useState("");
   const [restockError, setRestockError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const visible = itemsForView(items ?? [], shopping ? "shopping" : "pantry", now);
+  const [search, setSearch] = useState("");
+  const [adjustTarget, setAdjustTarget] = useState<{ id: string; item: KitchenItem; direction: "add" | "subtract" } | null>(null);
+  const [adjustAmount, setAdjustAmount] = useState("");
+  const [adjustError, setAdjustError] = useState<string | null>(null);
+  const [adjustBusy, setAdjustBusy] = useState(false);
+  const pendingPurchases = useRef(new Set<string>());
+  const visible = filterItemsByName(itemsForView(items ?? [], shopping ? "shopping" : "pantry", now), search);
+  const deleted = recentlyDeletedItems(items ?? [], now.getTime());
 
   useEffect(() => {
-    const timer = setInterval(() => setNow(new Date()), 60_000);
+    const timer = setInterval(() => setNow(new Date()), 1_000);
     return () => clearInterval(timer);
   }, []);
 
@@ -315,7 +335,7 @@ export default function InventoryScreen({ shopping = false }: { shopping?: boole
     try {
       await deleteItem(getDatabase(), id);
       setActionError(null);
-      showToast("Item deleted.");
+      showToast("Item deleted. You can undo for one minute.");
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : String(caught);
       setActionError(message);
@@ -325,30 +345,26 @@ export default function InventoryScreen({ shopping = false }: { shopping?: boole
   }
 
   async function markBought(id: string, bought: boolean) {
-    const allShoppingItems = itemsForView(items ?? [], "shopping");
-    const purchaseItems = itemsForPurchaseCompletion(allShoppingItems);
-    const target = allShoppingItems.find(({ id: itemId }) => itemId === id);
-    const allBought = purchaseItems.length > 0 && purchaseItems.every(({ id: itemId, item }) => (
-      itemId === id ? bought : item.bought === true
-    ));
+    if (pendingPurchases.current.has(id)) return;
+    pendingPurchases.current.add(id);
     try {
-      if (allBought) {
-        await completeShoppingList(
-          getDatabase(),
-          purchaseItems.map(({ id: itemId }) => itemId),
-          id
-        );
-        showToast("All shopping-list items purchased and moved to Pantry.");
-      } else {
-        await setItemBought(
-          getDatabase(),
-          id,
-          bought,
-          !bought && target?.item.state === "inStock" ? "toBuy" : undefined
-        );
-        if (!bought) showToast("Purchase unchecked.", "info");
-      }
+      await setItemBought(getDatabase(), id, bought);
+      showToast(bought ? "Item moved to Pantry." : "Purchase unchecked.", "info");
       setActionError(null);
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : String(caught);
+      setActionError(message);
+      showToast(message, "error");
+    } finally {
+      pendingPurchases.current.delete(id);
+    }
+  }
+
+  async function undoDelete(id: string) {
+    try {
+      await undoDeleteItem(getDatabase(), id);
+      setActionError(null);
+      showToast("Item restored.");
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : String(caught);
       setActionError(message);
@@ -357,10 +373,10 @@ export default function InventoryScreen({ shopping = false }: { shopping?: boole
   }
 
   async function saveRestock() {
-    const quantity = Number(restockQuantity);
-    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 9999) {
-      setRestockError("Enter a whole number between 1 and 9999.");
-      showToast("Enter a whole number between 1 and 9999.", "error");
+    const quantity = parseQuantity(restockQuantity);
+    if (quantity === null || quantity === 0) {
+      setRestockError("Enter an amount above 0 and up to 9999, with at most 9 decimal places.");
+      showToast("Enter an amount above 0 and up to 9999, with at most 9 decimal places.", "error");
       return;
     }
     if (!restockTarget) return;
@@ -368,6 +384,7 @@ export default function InventoryScreen({ shopping = false }: { shopping?: boole
     try {
       await updateItem(getDatabase(), restockTarget.id, {
         quantity,
+        stockBaseline: quantity,
         state: "inStock",
         bought: false,
         boughtAt: null,
@@ -385,30 +402,69 @@ export default function InventoryScreen({ shopping = false }: { shopping?: boole
     }
   }
 
+  async function saveAdjustment() {
+    if (!adjustTarget || adjustBusy) return;
+    const amount = parseQuantity(adjustAmount);
+    if (amount === null || amount === 0) {
+      setAdjustError("Enter an amount above 0 and up to 9999, with at most 9 decimal places.");
+      return;
+    }
+    setAdjustBusy(true);
+    setAdjustError(null);
+    try {
+      await adjustItemQuantity(getDatabase(), adjustTarget.id, adjustTarget.direction === "add" ? amount : -amount);
+      setAdjustTarget(null);
+      showToast("Quantity updated.");
+    } catch (caught) {
+      setAdjustError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setAdjustBusy(false);
+    }
+  }
+
   return (
-    <View style={styles.page}>
+    <View style={[styles.page, !shopping && { paddingTop: insets.top + 18 }]}>
       <View style={styles.heading}>
         <View style={styles.headingText}>
           <Text style={styles.eyebrow}>{shopping ? "YOUR NEXT SHOP" : "IN YOUR KITCHEN"}</Text>
           <Text style={styles.title}>{shopping ? "Shopping List" : "Pantry"}</Text>
         </View>
-        <Pressable accessibilityRole="button" onPress={() => { setEditing(null); setAdding(true); }} style={styles.primaryButton}>
-          <Text style={styles.primaryText}>＋ Add</Text>
-        </Pressable>
+        <View style={styles.headingActions}>
+          {!shopping && <NotificationsButton />}
+          <Pressable accessibilityRole="button" onPress={() => { setEditing(null); setAdding(true); }} style={styles.primaryButton}>
+            <Text style={styles.primaryText}>＋ Add</Text>
+          </Pressable>
+        </View>
       </View>
       <Text style={styles.swipeHint}>
-        {shopping ? "Tap to mark bought · swipe left to delete" : "Swipe right to restock · left to delete"}
+        {shopping ? "Swipe right to mark or reset purchase · left to delete" : "Swipe right to restock · left to delete"}
       </Text>
+      <TextInput
+        accessibilityLabel={shopping ? "Search shopping list" : "Search pantry"}
+        placeholder={shopping ? "Search shopping list…" : "Search pantry…"}
+        value={search}
+        onChangeText={setSearch}
+        style={styles.searchInput}
+        autoCorrect={false}
+      />
       {loading && <Text style={styles.message}>Loading items…</Text>}
       {error && !loading && <Text accessibilityRole="alert" style={styles.error}>Could not load items: {error}</Text>}
       {actionError && <Text accessibilityRole="alert" style={styles.error}>{actionError}</Text>}
       {!loading && !error && visible.length === 0 && (
         <View style={styles.empty}>
-          <Text style={styles.emptyTitle}>{shopping ? "Your list is clear" : "Your pantry is empty"}</Text>
-          <Text style={styles.message}>{shopping ? "Add an item or mark pantry items as finished." : "Add your first kitchen item to get started."}</Text>
+          <Text style={styles.emptyTitle}>{search.trim() ? "No matching items" : shopping ? "Your list is clear" : "Your pantry is empty"}</Text>
+          <Text style={styles.message}>{search.trim() ? "Try a different search." : shopping ? "Add an item or mark pantry items as finished." : "Add your first kitchen item to get started."}</Text>
         </View>
       )}
       <ScrollView contentContainerStyle={styles.list}>
+        {deleted.length > 0 && <View accessibilityLabel="Recently deleted items" style={styles.deletedItems}>
+          {deleted.map(({ id, item }) => <View key={id} style={styles.deletedItem}>
+            <Text style={styles.deletedText}>{item.name} deleted · {Math.max(0, Math.ceil(((item.deletedAt?.toMillis() ?? 0) + itemUndoMilliseconds - now.getTime()) / 1000))}s to undo</Text>
+            <Pressable accessibilityRole="button" accessibilityLabel={`Undo deletion of ${item.name}`} onPress={() => void undoDelete(id)} style={styles.secondaryButton}>
+              <Text style={styles.secondaryText}>Undo</Text>
+            </Pressable>
+          </View>)}
+        </View>}
         {visible.map(({ id, item }) => (
           <InventoryItemRow
             key={id}
@@ -422,10 +478,32 @@ export default function InventoryScreen({ shopping = false }: { shopping?: boole
               setRestockQuantity("");
               setRestockError(null);
             }}
+            onAdjust={(direction) => {
+              setAdjustTarget({ id, item, direction });
+              setAdjustAmount("");
+              setAdjustError(null);
+            }}
             onDelete={() => removeItem(id)}
           />
         ))}
       </ScrollView>
+      <Modal animationType="fade" transparent visible={adjustTarget !== null} onRequestClose={() => { if (!adjustBusy) setAdjustTarget(null); }}>
+        <View style={styles.backdrop}>
+          <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={styles.keyboardAvoidingView}>
+            <View style={styles.dialog}>
+              <Text style={styles.dialogTitle}>{adjustTarget?.direction === "add" ? "Add to" : "Subtract from"} {adjustTarget?.item.name}</Text>
+              <Text style={styles.label}>Current quantity: {adjustTarget && formatQuantity(adjustTarget.item.quantity)}</Text>
+              <Text style={styles.label}>Amount</Text>
+              <TextInput accessibilityLabel="Adjustment amount" keyboardType="decimal-pad" value={adjustAmount} onChangeText={setAdjustAmount} style={styles.input} />
+              {adjustError && <Text accessibilityRole="alert" style={styles.error}>{adjustError}</Text>}
+              <View style={styles.formActions}>
+                <Pressable accessibilityRole="button" disabled={adjustBusy} onPress={() => setAdjustTarget(null)} style={styles.secondaryButton}><Text style={styles.secondaryText}>Cancel</Text></Pressable>
+                <Pressable accessibilityRole="button" disabled={adjustBusy} onPress={() => void saveAdjustment()} style={styles.primaryButton}><Text style={styles.primaryText}>Update quantity</Text></Pressable>
+              </View>
+            </View>
+          </KeyboardAvoidingView>
+        </View>
+      </Modal>
       <Modal
         animationType="slide"
         onRequestClose={() => { Keyboard.dismiss(); setAdding(false); setEditing(null); }}
@@ -474,7 +552,7 @@ export default function InventoryScreen({ shopping = false }: { shopping?: boole
               <TextInput
                 accessibilityLabel="New stock quantity"
                 autoFocus
-                keyboardType="number-pad"
+                keyboardType="decimal-pad"
                 onChangeText={setRestockQuantity}
                 placeholder="e.g. 3"
                 style={styles.input}
@@ -501,14 +579,19 @@ const styles = StyleSheet.create({
   page: { flex: 1, padding: 18, backgroundColor: "#f5f8f2" },
   heading: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 22 },
   headingText: { flex: 1 },
+  headingActions: { flexDirection: "row", alignItems: "center", gap: 8 },
   swipeHint: { color: "#748078", fontSize: 11, marginTop: -14, marginBottom: 12 },
+  searchInput: { borderWidth: 1, borderColor: "#dfe7df", borderRadius: 9, paddingHorizontal: 12, paddingVertical: 10, color: "#273a2e", backgroundColor: "#fff", marginBottom: 12 },
   eyebrow: { color: "#7e9c88", fontSize: 10, fontWeight: "700", letterSpacing: 1.4 },
   title: { color: "#26392e", fontSize: 29, fontWeight: "800", marginTop: 4 },
   primaryButton: { backgroundColor: "#31835d", borderRadius: 10, paddingVertical: 11, paddingHorizontal: 14 },
   primaryText: { color: "#fff", fontWeight: "700" },
   list: { gap: 10, paddingBottom: 20 },
+  deletedItems: { gap: 8, marginBottom: 12 },
+  deletedItem: { flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: "#edf2ed", borderRadius: 9, padding: 8 },
+  deletedText: { flex: 1, color: "#47584c", fontSize: 12 },
   swipeContainer: { borderRadius: 14 },
-  itemCard: { minHeight: 75, backgroundColor: "#fff", borderColor: "#e8eee8", borderWidth: 1, borderRadius: 14, padding: 12, flexDirection: "row", alignItems: "center", gap: 8 },
+  itemCard: { minHeight: 75, backgroundColor: "#fff", borderColor: "#e8eee8", borderWidth: 1, borderRadius: 14, padding: 12, flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 8 },
   stockCriticalCard: { backgroundColor: "#b42318", borderColor: "#b42318" },
   stockLowCard: { backgroundColor: "#b45309", borderColor: "#b45309" },
   swipeAction: { width: 88, minHeight: 75, alignItems: "center", justifyContent: "center" },
@@ -516,6 +599,7 @@ const styles = StyleSheet.create({
   deleteAction: { backgroundColor: "#b53c37", borderTopRightRadius: 14, borderBottomRightRadius: 14 },
   swipeActionText: { color: "#fff", fontSize: 12, fontWeight: "700" },
   itemText: { flex: 1 },
+  pantryItemText: { flexBasis: "100%" },
   itemName: { color: "#2e4035", fontSize: 15, fontWeight: "700" },
   boughtItemName: { color: "#87928a", textDecorationLine: "line-through" },
   itemDetail: { color: "#748078", fontSize: 11, marginTop: 5 },

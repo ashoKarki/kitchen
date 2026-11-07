@@ -9,6 +9,7 @@
     "functions"
   ],
   "scripts": {
+    "mobile": "npm run start --workspace=@my-kitchen/mobile",
     "type-check": "npm run type-check --workspaces --if-present",
     "lint": "eslint packages/shared/src packages/shared/test apps/web/src functions/src functions/test apps/mobile/src apps/mobile/app",
     "test": "npm run test --workspaces --if-present",

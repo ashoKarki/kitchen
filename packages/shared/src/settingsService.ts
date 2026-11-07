@@ -5,15 +5,15 @@ import {
   writeBatch,
   type Firestore
 } from "firebase/firestore";
-import { DEFAULT_SETTINGS, KITCHEN_DOC_PATH } from "./constants.js";
+import { DEFAULT_SETTINGS, getKitchenDocPath } from "./constants.js";
 import type { KitchenSettings } from "./types.js";
 
 export function settingsDocument(db: Firestore) {
-  return doc(db, KITCHEN_DOC_PATH);
+  return doc(db, getKitchenDocPath());
 }
 
 export function memberSettingsDocument(db: Firestore, uid: string) {
-  return doc(db, `${KITCHEN_DOC_PATH}/memberSettings/${uid}`);
+  return doc(db, `${getKitchenDocPath()}/memberSettings/${uid}`);
 }
 
 export async function ensureSettings(db: Firestore, timeZone: string): Promise<void> {

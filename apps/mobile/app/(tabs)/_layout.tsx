@@ -2,6 +2,7 @@ import { Tabs } from "expo-router";
 import { Text, View, type ColorValue } from "react-native";
 import Svg, { Circle, Path } from "react-native-svg";
 import { usePushStatus } from "../../src/pushStatus";
+import NotificationsButton from "../../src/NotificationsButton";
 
 type KitchenTab = "pantry" | "shopping" | "expenses" | "budgets" | "insights" | "settings";
 
@@ -47,10 +48,11 @@ export default function TabLayout() {
           tabBarActiveTintColor: "#31835d",
           tabBarInactiveTintColor: "#8a928c",
           tabBarStyle: { backgroundColor: "#ffffff" },
-          tabBarIconStyle: { marginTop: 2 }
+          tabBarIconStyle: { marginTop: 2 },
+          headerRight: () => <View style={{ marginRight: 18 }}><NotificationsButton /></View>
         }}
       >
-        <Tabs.Screen name="index" options={{ title: "Pantry", tabBarLabel: "Pantry", tabBarIcon: ({ color, size }) => <TabIcon name="pantry" color={color} size={size} /> }} />
+        <Tabs.Screen name="index" options={{ title: "Pantry", headerShown: false, tabBarLabel: "Pantry", tabBarIcon: ({ color, size }) => <TabIcon name="pantry" color={color} size={size} /> }} />
         <Tabs.Screen name="shopping" options={{ title: "Shopping List", tabBarLabel: "Shopping", tabBarIcon: ({ color, size }) => <TabIcon name="shopping" color={color} size={size} /> }} />
         <Tabs.Screen name="expenses" options={{ title: "Expenses", tabBarLabel: "Expenses", tabBarIcon: ({ color, size }) => <TabIcon name="expenses" color={color} size={size} /> }} />
         <Tabs.Screen name="budgets" options={{ title: "Budgets", tabBarLabel: "Budgets", tabBarIcon: ({ color, size }) => <TabIcon name="budgets" color={color} size={size} /> }} />

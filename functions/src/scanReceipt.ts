@@ -35,10 +35,10 @@ function categoriesFromSettings(value: unknown): ExpenseCategory[] {
   return parsed.data;
 }
 
-async function consumeDailyScan(): Promise<void> {
+async function consumeDailyScan(householdId: string): Promise<void> {
   const db = getFirestore();
   const dateKey = new Date().toISOString().slice(0, 10);
-  const usageRef = db.doc(`kitchen/main/usage/${dateKey}`);
+  const usageRef = db.doc(`kitchen/${householdId}/usage/${dateKey}`);
   await db.runTransaction(async (transaction) => {
     const snapshot = await transaction.get(usageRef);
     const count: unknown = snapshot.get("scans");
@@ -130,7 +130,7 @@ export const scanReceipt = onCall(
     secrets: [anthropicApiKey]
   },
   async (request) => {
-    await requireMember(request);
+    const member = await requireMember(request);
     const parsedInput = inputSchema.safeParse(request.data);
     if (!parsedInput.success) {
       throw new HttpsError("invalid-argument", `Invalid scan request: ${parsedInput.error.issues[0]?.message ?? "invalid input"}`);
@@ -138,14 +138,14 @@ export const scanReceipt = onCall(
     if (!/^[A-Za-z0-9+/]+={0,2}$/.test(parsedInput.data.imageBase64)) {
       throw new HttpsError("invalid-argument", "Image data is not valid base64.");
     }
-    await consumeDailyScan();
+    await consumeDailyScan(member.householdId);
 
     const apiKey = anthropicApiKey.value();
     if (!apiKey) throw new HttpsError("failed-precondition", "Receipt scanning is not configured on the server.");
 
     try {
       const client = new Anthropic({ apiKey, timeout: 50_000, maxRetries: 1 });
-      const settings = await getFirestore().doc("kitchen/main").get();
+      const settings = await getFirestore().doc(`kitchen/${member.householdId}`).get();
       const discretionaryCategories = categoriesFromSettings(settings.data());
       const parsed = await requestParsedReceipt(
         client,
@@ -161,8 +161,7 @@ export const scanReceipt = onCall(
         console.error("Receipt scanning provider error", {
           name: error.name,
           status: error.status,
-          requestID: error.requestID,
-          message: error.message
+          requestID: error.requestID
         });
         if (error.status === 401 || error.status === 403) {
           throw new HttpsError(
@@ -197,7 +196,9 @@ export const scanReceipt = onCall(
           );
         }
       }
-      console.error("Receipt scanning failed", error);
+      console.error("Receipt scanning failed", {
+        name: error instanceof Error ? error.name : "UnknownError"
+      });
       throw new HttpsError("internal", "Receipt scan failed. Please retry or enter the expense manually.");
     }
   }
