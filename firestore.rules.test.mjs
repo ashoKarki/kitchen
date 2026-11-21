@@ -1,11 +1,14 @@
 import { after, before, test } from "node:test";
+import { rejects } from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import {
   assertFails,
   assertSucceeds,
   initializeTestEnvironment
 } from "@firebase/rules-unit-testing";
-import { deleteDoc, deleteField, doc, getDoc, serverTimestamp, setDoc, updateDoc, writeBatch } from "firebase/firestore";
+import { deleteDoc, deleteField, doc, getDoc, onSnapshot, serverTimestamp, setDoc, Timestamp, updateDoc, writeBatch } from "firebase/firestore";
+import { createReceipt, deleteReceipt, isUnreceiptedPurchase, setActiveKitchenId, unreceiptedPurchaseItems } from "./packages/shared/dist/index.js";
+import { app as sharedApp, firestore as sharedFirestore } from "./packages/shared/test/receiptEmulatorSdk.mjs";
 
 const settings = {
   reminderEnabled: true,
@@ -145,6 +148,21 @@ test("item quantities and stock baselines accept valid decimals", async () => {
   await assertFails(updateDoc(ref, { stockBaseline: 10000 }));
 });
 
+test("item expiry dates must be valid calendar dates or null", async () => {
+  const member = testEnvironment.authenticatedContext("partner", {
+    email: "partner@example.test", email_verified: true
+  }).firestore();
+  const ref = doc(member, "kitchen/main/items/expiry-test");
+  await assertSucceeds(setDoc(ref, { name: "Milk", quantity: 1, category: "Groceries", state: "inStock", expiryDate: "2024-02-29" }));
+  for (const date of ["2000-02-29", "1900-01-01", "9999-12-31"]) {
+    await assertSucceeds(updateDoc(ref, { expiryDate: date }));
+  }
+  for (const date of ["1900-02-29", "2023-02-29", "2024-04-31", "2024-13-01", "1899-12-31", 123]) {
+    await assertFails(updateDoc(ref, { expiryDate: date }));
+  }
+  await assertSucceeds(updateDoc(ref, { expiryDate: null }));
+});
+
 test("household notifications are readable and only their read flag can be changed", async () => {
   const member = testEnvironment.authenticatedContext("partner", {
     email: "partner@example.test", email_verified: true
@@ -164,6 +182,89 @@ test("household notifications are readable and only their read flag can be chang
   await assertFails(setDoc(doc(member, "kitchen/main/alerts/fake"), { read: false }));
   await assertFails(getDoc(doc(outsider, "kitchen/main/alerts/test-alert")));
   await assertFails(updateDoc(doc(outsider, "kitchen/main/alerts/test-alert"), { read: true }));
+});
+
+test("household alert read and unread changes reach both clients", async () => {
+  const owner = testEnvironment.authenticatedContext("owner", {
+    email: "owner@example.test", email_verified: true
+  }).firestore();
+  const partner = testEnvironment.authenticatedContext("partner", {
+    email: "partner@example.test", email_verified: true
+  }).firestore();
+  const path = "kitchen/main/alerts/sync-test";
+  await testEnvironment.withSecurityRulesDisabled(async (context) => {
+    await setDoc(doc(context.firestore(), path), { budgetName: "Food", read: false });
+  });
+  const refs = [doc(owner, path), doc(partner, path)];
+  const observed = [[], []];
+  const unsubscribes = refs.map((ref, index) => onSnapshot(ref, (snapshot) => {
+    observed[index].push(snapshot.data()?.read);
+  }));
+  async function waitForBoth(expected) {
+    const deadline = Date.now() + 5000;
+    while (!observed.every((values) => values.includes(expected))) {
+      if (Date.now() >= deadline) throw new Error(`Alert state ${expected} was not observed by both clients`);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    observed.forEach((values) => { values.length = 0; });
+  }
+  try {
+    await waitForBoth(false);
+    await assertSucceeds(updateDoc(refs[0], { read: true }));
+    await waitForBoth(true);
+    await assertSucceeds(updateDoc(refs[1], { read: false }));
+    await waitForBoth(false);
+  } finally {
+    unsubscribes.forEach((unsubscribe) => unsubscribe());
+  }
+});
+
+test("receipt deletion restores only its unchanged purchases atomically", async () => {
+  const app = sharedApp.initializeApp({ projectId: "demo-my-kitchen", apiKey: "test" }, "receipt-integration");
+  const member = sharedFirestore.getFirestore(app);
+  const [host, port] = process.env.FIRESTORE_EMULATOR_HOST.split(":");
+  sharedFirestore.connectFirestoreEmulator(member, host, Number(port), {
+    mockUserToken: { sub: "partner", user_id: "partner", email: "partner@example.test", email_verified: true }
+  });
+  setActiveKitchenId("main");
+  const baseItem = {
+    name: "Apples", quantity: 3, category: "Groceries", state: "inStock",
+    bought: true, boughtAt: Timestamp.now(), receiptRecorded: false
+  };
+  await testEnvironment.withSecurityRulesDisabled(async (context) => {
+    for (const id of ["receipt-apple", "receipt-orange"]) {
+      await setDoc(doc(context.firestore(), `kitchen/main/items/${id}`), baseItem);
+    }
+  });
+  const receipt = {
+    source: "manual", storeName: "Store", purchaseDateKey: "2026-11-07",
+    totalCents: 500, currency: "EUR", lineItems: [], dedupeHash: "test"
+  };
+  try {
+    await rejects(createReceipt(member, receipt, Array.from({ length: 500 }, (_, i) => `item-${i}`)), /at most 499/);
+    const receiptId = await createReceipt(member, receipt, ["receipt-apple", "receipt-orange"]);
+    const apple = sharedFirestore.doc(member, "kitchen/main/items/receipt-apple");
+    const orange = sharedFirestore.doc(member, "kitchen/main/items/receipt-orange");
+    const saved = await sharedFirestore.getDoc(apple);
+    if (!saved.get("receiptRecorded") || saved.get("receiptId") !== receiptId) throw new Error("Purchase was not linked");
+    await rejects(createReceipt(member, receipt, ["receipt-apple"]), /no longer available/);
+    await sharedFirestore.updateDoc(orange, { boughtAt: sharedFirestore.Timestamp.fromMillis(baseItem.boughtAt.toMillis() + 1000) });
+    const result = await deleteReceipt(member, receiptId);
+    if (result.restored !== 1 || result.legacy) throw new Error("Unexpected restored purchase count");
+    const restored = await sharedFirestore.getDoc(apple);
+    if (restored.get("quantity") !== 3 || restored.get("state") !== "inStock"
+      || !isUnreceiptedPurchase(restored.data(), Date.now() + 172_800_000)) throw new Error("Purchase was not restored correctly");
+    const billItems = unreceiptedPurchaseItems([{ id: apple.id, item: restored.data() }], Date.now() + 172_800_000);
+    if (billItems.length !== 1 || billItems[0].id !== "receipt-apple") throw new Error("Restored purchase is missing from Items for this bill");
+    if (!(await sharedFirestore.getDoc(orange)).get("receiptRecorded")) throw new Error("A newer purchase was changed");
+    if ((await sharedFirestore.getDoc(sharedFirestore.doc(member, `kitchen/main/receipts/${receiptId}`))).exists()) throw new Error("Receipt was not deleted");
+    const legacy = sharedFirestore.doc(member, "kitchen/main/receipts/legacy-test");
+    await sharedFirestore.setDoc(legacy, receipt);
+    if (!(await deleteReceipt(member, "legacy-test")).legacy) throw new Error("Legacy receipt was not identified");
+  } finally {
+    await sharedFirestore.terminate(member);
+    await sharedApp.deleteApp(app);
+  }
 });
 
 test("household owners are isolated and cannot change their active household", async () => {

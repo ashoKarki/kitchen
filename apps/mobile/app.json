@@ -19,6 +19,7 @@
     },
     "plugins": [
       "expo-router",
+      "./voice/withVoiceShopping.cjs",
       [
         "expo-splash-screen",
         {

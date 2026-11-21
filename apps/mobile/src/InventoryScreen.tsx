@@ -23,11 +23,15 @@ import {
   adjustItemQuantity,
   deleteItem,
   expenseCategories,
+  expiryDaysRemaining,
+  expiryDescription,
+  expiryWarningDays,
   filterItemsByName,
   formatQuantity,
   itemsForView,
   recentlyDeletedItems,
   itemUndoMilliseconds,
+  isValidExpiryDate,
   parseQuantity,
   setItemBought,
   stockWarning,
@@ -41,24 +45,33 @@ import {
 import { getDatabase } from "./firebase";
 import { useItems } from "./useItems";
 
-function ItemForm({
+export function ItemForm({
   existing,
   state,
-  onClose
+  initialName,
+  onClose,
+  onSaved,
+  onSavingChange
 }: {
   existing: { id: string; item: KitchenItem } | null;
   state: ItemState;
+  initialName?: string;
   onClose: () => void;
+  onSaved?: () => void;
+  onSavingChange?: (saving: boolean) => void;
 }) {
   const { showToast } = useToast();
-  const [name, setName] = useState(existing?.item.name ?? "");
+  const [name, setName] = useState(existing?.item.name ?? initialName ?? "");
   const [quantity, setQuantity] = useState(formatQuantity(existing?.item.quantity ?? 1));
-  const [category, setCategory] = useState<ExpenseCategory>(existing?.item.category ?? "Other");
+  const [category, setCategory] = useState<ExpenseCategory>(existing?.item.category ?? "Groceries");
+  const [expiryDate, setExpiryDate] = useState(existing?.item.expiryDate ?? "");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
   const allowsZero = existing ? existing.item.state !== "toBuy" : state !== "toBuy";
 
   async function save() {
+    if (savingRef.current) return;
     const parsedQuantity = parseQuantity(quantity);
     if (!name.trim()) {
       setError("Enter an item name.");
@@ -68,13 +81,20 @@ function ItemForm({
       setError(`Quantity must be ${allowsZero ? "at least" : "greater than"} 0 and at most 9999, with up to 9 decimal places.`);
       return;
     }
+    if (expiryDate && !isValidExpiryDate(expiryDate)) {
+      setError("Enter a valid expiry date in YYYY-MM-DD format.");
+      return;
+    }
 
+    savingRef.current = true;
     setSaving(true);
+    onSavingChange?.(true);
     setError(null);
     const newItem: NewKitchenItem = {
       name: name.trim(),
       quantity: parsedQuantity,
       category,
+      expiryDate: expiryDate || null,
       state: state === "inStock" && parsedQuantity === 0 ? "finished" : state
     };
     try {
@@ -87,6 +107,7 @@ function ItemForm({
             ...(newItem.quantity !== existing.item.quantity ? { state: newItem.quantity === 0 ? "finished" : "inStock" } : {})
           } : {}),
           category: newItem.category,
+          expiryDate: newItem.expiryDate ?? null,
           bought: false,
           boughtAt: null,
           receiptRecorded: false
@@ -95,13 +116,16 @@ function ItemForm({
         await createItem(getDatabase(), newItem);
       }
       showToast(existing ? `${newItem.name} updated.` : `${newItem.name} added to ${state === "toBuy" ? "Shopping List" : "Pantry"}.`);
-      onClose();
+      if (onSaved) onSaved();
+      else onClose();
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : String(caught);
       setError(message);
       showToast(message, "error");
     } finally {
+      savingRef.current = false;
       setSaving(false);
+      onSavingChange?.(false);
     }
   }
 
@@ -137,9 +161,20 @@ function ItemForm({
         useNativeAndroidPickerStyle={false}
         Icon={() => <Text style={styles.pickerChevron}>⌄</Text>}
       />
+      <Text style={styles.label}>Expiry date (optional)</Text>
+      <TextInput
+        accessibilityLabel="Expiry date"
+        autoCapitalize="none"
+        keyboardType="numbers-and-punctuation"
+        maxLength={10}
+        onChangeText={setExpiryDate}
+        placeholder="YYYY-MM-DD"
+        style={styles.input}
+        value={expiryDate}
+      />
       {error && <Text accessibilityRole="alert" style={styles.error}>{error}</Text>}
       <View style={styles.formActions}>
-        <Pressable accessibilityRole="button" onPress={onClose} style={styles.secondaryButton}>
+        <Pressable accessibilityRole="button" disabled={saving} onPress={onClose} style={styles.secondaryButton}>
           <Text style={styles.secondaryText}>Cancel</Text>
         </Pressable>
         <Pressable accessibilityRole="button" disabled={saving} onPress={() => void save()} style={styles.primaryButton}>
@@ -265,6 +300,10 @@ function InventoryItemRow({
           ]}>
             Qty {formatQuantity(item.quantity)} · {item.category}{warning ? ` · ${warning === "critical" ? "Critical stock" : "Low stock"}` : ""}
           </Text>
+          {item.expiryDate && <Text style={[styles.itemDetail, warning && styles.stockCardText]}>
+            {item.state === "inStock" && expiryDaysRemaining(item.expiryDate) <= expiryWarningDays
+              ? expiryDescription(item.expiryDate) : `Expires ${item.expiryDate}`}
+          </Text>}
         </Pressable>
         {item.state === "finished" && (
           <Text style={[styles.finished, warning && styles.stockCardFinished]}>

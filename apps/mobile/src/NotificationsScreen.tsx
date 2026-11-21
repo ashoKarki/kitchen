@@ -1,12 +1,16 @@
 import { useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { Link } from "expo-router";
-import { formatCents, markBudgetAlertRead } from "@my-kitchen/shared";
+import { expiryDescription, formatCents, markBudgetAlertRead } from "@my-kitchen/shared";
 import { getDatabase } from "./firebase";
 import { useBudgetAlerts } from "./useBudgetData";
+import { useToast } from "./toast";
+import { useExpiryWarnings } from "./useExpiryWarnings";
 
 export default function NotificationsScreen() {
   const alerts = useBudgetAlerts();
+  const expiry = useExpiryWarnings();
+  const { showToast } = useToast();
   const [error, setError] = useState<string | null>(null);
 
   async function toggleRead(id: string, read: boolean) {
@@ -18,16 +22,33 @@ export default function NotificationsScreen() {
     }
   }
 
+  async function openAlert(id: string, read: boolean) {
+    if (read) return;
+    try {
+      await markBudgetAlertRead(getDatabase(), id);
+    } catch (caught) {
+      showToast(`Could not mark notification read: ${caught instanceof Error ? caught.message : String(caught)}`, "error");
+    }
+  }
+
   return <ScrollView style={styles.page} contentContainerStyle={styles.content}>
     <Text style={styles.eyebrow}>HOUSEHOLD ACTIVITY</Text>
     <Text style={styles.title}>Notifications</Text>
-    <Text style={styles.muted}>Budget alerts and read status are shared with household members.</Text>
+    <Text style={styles.muted}>Expiry warnings and budget alerts for your household. Budget alert read status is shared.</Text>
     {error && <Text accessibilityRole="alert" style={styles.error}>{error}</Text>}
     {alerts.error && <Text accessibilityRole="alert" style={styles.error}>Could not load notifications: {alerts.error}</Text>}
-    {alerts.loading && <Text style={styles.muted}>Loading notifications…</Text>}
-    {!alerts.loading && !alerts.error && !alerts.data?.length && <Text style={styles.muted}>No notifications yet. Budget alerts will appear here when an active budget reaches a warning threshold.</Text>}
+    {expiry.error && <Text accessibilityRole="alert" style={styles.error}>Could not load expiry warnings: {expiry.error}</Text>}
+    {(alerts.loading || expiry.loading) && <Text style={styles.muted}>Loading notifications…</Text>}
+    {!alerts.loading && !expiry.loading && !alerts.error && !expiry.error && !alerts.data?.length && !expiry.warnings.length && <Text style={styles.muted}>No notifications yet. Expiry warnings and budget alerts will appear here.</Text>}
+    {expiry.warnings.map(({ id, item }) => <Link key={id} href="/(tabs)" asChild>
+      <Pressable accessibilityRole="link" accessibilityLabel={`View expiry warning for ${item.name}`} style={[styles.card, styles.unread]}>
+        <Text style={styles.cardTitle}>{item.name}: {expiryDescription(item.expiryDate, expiry.now)}</Text>
+        <Text style={styles.muted}>Expiry date: {item.expiryDate}</Text>
+        <Text style={styles.buttonText}>View pantry →</Text>
+      </Pressable>
+    </Link>)}
     {[...(alerts.data ?? [])].sort((a, b) => b.alert.createdAt.toMillis() - a.alert.createdAt.toMillis()).map(({ id, alert }) => <View key={id} style={[styles.card, !alert.read && styles.unread]}>
-      <Link href="/budgets" asChild>
+      <Link href="/budgets" onPress={() => void openAlert(id, alert.read)} asChild>
         <Pressable accessibilityRole="link" accessibilityLabel={`View budget alert for ${alert.budgetName}`} style={styles.destination}>
           <Text style={styles.cardTitle}>{alert.budgetName}: {alert.thresholdPercent}% reached</Text>
           <Text style={styles.muted}>{formatCents(alert.spentCents)} of {formatCents(alert.amountCents)} · {alert.periodKey}</Text>

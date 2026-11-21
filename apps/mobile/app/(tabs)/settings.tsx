@@ -120,6 +120,11 @@ export default function SettingsScreen() {
       </View>
 
       <View style={styles.card}>
+        <Text style={styles.sectionTitle}>Expiry warnings</Text>
+        <Text style={styles.muted}>Items with an expiry date are highlighted three days before expiry. This device can also show a local reminder at 9:00 AM; allow notifications in system settings and open the app to sync changes.</Text>
+      </View>
+
+      <View style={styles.card}>
         <Text style={styles.sectionTitle}>Budget alerts</Text>
         <Text style={styles.muted}>Receive an in-app and push alert as an active budget reaches its warning thresholds and goes over budget.</Text>
         <View style={styles.row}>

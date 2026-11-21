@@ -99,6 +99,51 @@ describe("parsedReceiptSchema", () => {
     }).success).toBe(false);
   });
 
+  it.each([
+    ["master card debit (contactless)", "card"],
+    ["Mastercard", "card"],
+    ["Visa Debit", "card"],
+    ["credit card", "card"],
+    ["American Express", "card"],
+    ["AMEX", "card"],
+    ["Discover", "card"],
+    ["Diners Club", "card"],
+    ["JCB", "card"],
+    ["UnionPay", "card"],
+    ["RuPay", "card"],
+    ["Maestro", "card"],
+    ["V PAY", "card"],
+    ["girocard", "card"],
+    ["EC-Karte", "card"],
+    ["electronic cash", "card"],
+    ["Debitkarte", "card"],
+    ["Bankomatkarte", "card"],
+    ["Kreditkarte", "card"],
+    ["Bancontact", "card"],
+    ["Dankort", "card"],
+    ["Interac", "card"],
+    ["eftpos", "card"],
+    ["Hipercard", "card"],
+    ["Mada", "card"],
+    ["Bargeld", "cash"],
+    [" CASH ", "cash"],
+    ["other", "other"]
+  ])("normalizes payment method %s to %s", (paymentMethod, expected) => {
+    expect(parsedReceiptSchema.parse({ ...germanReceipt, paymentMethod }).paymentMethod).toBe(expected);
+  });
+
+  it("allows missing payment methods but rejects ambiguous or unknown values for correction", () => {
+    expect(parsedReceiptSchema.parse({ ...germanReceipt, paymentMethod: null }).paymentMethod).toBeUndefined();
+    expect(parsedReceiptSchema.parse({ ...germanReceipt, paymentMethod: undefined }).paymentMethod).toBeUndefined();
+    expect(parsedReceiptSchema.safeParse({ ...germanReceipt, paymentMethod: "cash and card" }).success).toBe(false);
+    expect(parsedReceiptSchema.safeParse({ ...germanReceipt, paymentMethod: "electronic cash and cash" }).success).toBe(false);
+    expect(parsedReceiptSchema.safeParse({ ...germanReceipt, paymentMethod: "gift card" }).success).toBe(false);
+    expect(parsedReceiptSchema.safeParse({ ...germanReceipt, paymentMethod: "PayPal and Visa" }).success).toBe(false);
+    expect(parsedReceiptSchema.safeParse({ ...germanReceipt, paymentMethod: "Apple Pay" }).success).toBe(false);
+    expect(parsedReceiptSchema.safeParse({ ...germanReceipt, paymentMethod: "unrecognized" }).success).toBe(false);
+    expect(parsedReceiptSchema.safeParse({ ...germanReceipt, paymentMethod: 123 }).success).toBe(false);
+  });
+
   it("accepts the German BILLA receipt details from the provided photo", () => {
     const receipt = parsedReceiptSchema.parse(billaReceipt);
     const classified = classifyReceiptLines(receipt, []);
