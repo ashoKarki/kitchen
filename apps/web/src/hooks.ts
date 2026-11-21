@@ -6,7 +6,7 @@ import {
   Timestamp,
   type Firestore
 } from "firebase/firestore";
-import { ensureSettings, getKitchenDocPath, memberSettingsDocument, expenseCategories } from "@my-kitchen/shared";
+import { ensureSettings, getKitchenDocPath, memberSettingsDocument, expenseCategories, isValidExpiryDate } from "@my-kitchen/shared";
 import type { KitchenItem, KitchenSettings, Receipt } from "@my-kitchen/shared";
 import { z } from "zod";
 import { getDatabase, getFirebaseAuth } from "./firebase";
@@ -15,12 +15,14 @@ import { useKitchenId } from "./useKitchenPath";
 const itemSchema = z.object({
   name: z.string().min(1).max(100),
   quantity: z.number().min(0).max(9999),
+  expiryDate: z.string().refine(isValidExpiryDate, "Invalid expiry date").nullable().optional(),
   stockBaseline: z.number().min(0).max(9999).optional(),
   category: z.enum(expenseCategories),
   state: z.enum(["inStock", "finished", "toBuy"]),
   bought: z.boolean().optional(),
   boughtAt: z.instanceof(Timestamp).nullable().optional(),
   receiptRecorded: z.boolean().optional(),
+  receiptRestored: z.boolean().optional(),
   deletedAt: z.instanceof(Timestamp).optional(),
   createdAt: z.instanceof(Timestamp),
   updatedAt: z.instanceof(Timestamp)

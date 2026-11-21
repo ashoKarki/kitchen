@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ChangeEvent, type DragEvent } from "r
 import { httpsCallable } from "firebase/functions";
 import {
   classifyLineItem,
-  markItemsReceiptRecorded,
+  matchingReceiptItems,
   filterReceiptsByPeriod,
   createReceipt,
   dedupeHash,
@@ -265,7 +265,7 @@ export default function ReceiptsPage() {
     setNotice(null);
     try {
       const imageBase64 = await fileToBase64(file);
-      const scanner = httpsCallable<ScanReceiptRequest, ScannedReceipt>(getCloudFunctions(), "scanReceipt");
+      const scanner = httpsCallable<ScanReceiptRequest, ScannedReceipt>(getCloudFunctions(), "scanReceipt", { timeout: 155_000 });
       const result = await scanner({
         imageBase64,
         mimeType: "image/jpeg"
@@ -419,7 +419,7 @@ export default function ReceiptsPage() {
 
   function changeLineName(index: number, name: string) {
     const fallback = classifyLineItem(name);
-    updateLine(index, { name, rawName: name, category: fallback.category, necessity: fallback.necessity });
+    updateLine(index, { name, ...(source === "manual" ? { rawName: name } : {}), category: fallback.category, necessity: fallback.necessity });
   }
 
   function startEditingReceipt(id: string, receipt: NonNullable<typeof receipts.data>[number]["receipt"]) {
@@ -493,25 +493,19 @@ export default function ReceiptsPage() {
       if (editingReceiptId) {
         await updateReceipt(getDatabase(), editingReceiptId, receipt);
       } else {
-        await createReceipt(getDatabase(), receipt);
+        const purchasedItemIds = (items.data ?? [])
+          .filter(({ id, item }) => receiptPurchaseItemIds.includes(id) && isUnreceiptedPurchase(item))
+          .map(({ id }) => id);
+        if (purchasedItemIds.length !== receiptPurchaseItemIds.length) {
+          throw new Error("A selected purchase is no longer available. Refresh and select the purchases again.");
+        }
+        await createReceipt(getDatabase(), receipt, purchasedItemIds);
       }
       let receiptNotice = editingReceiptId ? "Receipt updated." : "Receipt saved. It will sync to your other devices.";
       let toastNotice = editingReceiptId ? "Expense updated." : "Expense saved.";
       if (receiptPurchaseItemIds.length > 0) {
-        const purchasedItemIds = (items.data ?? [])
-          .filter(({ id, item }) => receiptPurchaseItemIds.includes(id) && isUnreceiptedPurchase(item))
-          .map(({ id }) => id);
-        try {
-          await markItemsReceiptRecorded(getDatabase(), purchasedItemIds);
-          if (purchasedItemIds.length > 0) {
-            receiptNotice += " Purchased items were removed from the shopping list.";
-            toastNotice += " Purchased items were cleared from Shopping List.";
-          }
-        } catch (caught) {
-          const message = `Receipt was saved, but the shopping list could not be updated: ${caught instanceof Error ? caught.message : String(caught)}`;
-          setError(message);
-          showToast(message, "error");
-        }
+        receiptNotice += " Purchased items were removed from the shopping list.";
+        toastNotice += " Purchased items were cleared from Shopping List.";
       }
       closeEditor();
       setPurchaseItemSelection(null);
@@ -528,10 +522,12 @@ export default function ReceiptsPage() {
   }
 
   async function removeReceipt(id: string) {
-    if (!window.confirm("Delete this receipt? This cannot be undone.")) return;
+    if (!window.confirm("Delete this receipt? Associated purchases will return to the expense list when available. This cannot be undone.")) return;
     try {
-      await deleteReceipt(getDatabase(), id);
-      showToast("Expense deleted.");
+      const result = await deleteReceipt(getDatabase(), id);
+      showToast(result.legacy
+        ? "Receipt deleted. Older receipts do not contain purchase links, so items could not be restored."
+        : `Receipt deleted. ${result.restored} purchased item${result.restored === 1 ? "" : "s"} restored.`);
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : String(caught);
       setError(message);
@@ -766,7 +762,12 @@ export default function ReceiptsPage() {
               onChange={(event) => changeLineName(index, event.target.value)}
             />
             {fieldErrors[`line-${index}`] && <span className="field-error" id={`receipt-line-${index}-error`}>{fieldErrors[`line-${index}`]}</span>}
+            {source === "scan" && line.rawName && <span className="muted">Receipt text: {line.rawName}</span>}
           </label>
+          {source === "scan" && matchingReceiptItems(line, items.data ?? []).map(({ id, item }) =>
+            <button type="button" className="action-button" key={id} onClick={() => updateLine(index, { name: item.name })}>
+              Use household name: {item.name}
+            </button>)}
           <label>Qty<input aria-label={`Line ${index + 1} quantity`} aria-invalid={Boolean(fieldErrors[`quantity-${index}`])} inputMode="decimal" type="text" value={lineQuantityInputs[index] ?? ""} onChange={(event) => {
             const value = event.target.value;
             setLineQuantityInputs((current) => current.map((entry, entryIndex) => entryIndex === index ? value : entry));

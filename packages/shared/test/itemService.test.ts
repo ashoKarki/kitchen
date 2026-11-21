@@ -6,11 +6,13 @@ const mocks = vi.hoisted(() => ({
   collection: vi.fn(() => "collection"),
   doc: vi.fn(() => "item-ref"),
   runTransaction: vi.fn(),
+  deleteField: vi.fn(() => "delete-field"),
   serverTimestamp: vi.fn(() => "server-time")
 }));
 
 vi.mock("firebase/firestore", () => ({
   collection: mocks.collection,
+  deleteField: mocks.deleteField,
   doc: mocks.doc,
   runTransaction: mocks.runTransaction,
   serverTimestamp: mocks.serverTimestamp
@@ -38,7 +40,7 @@ describe("setItemBought", () => {
     await setItemBought(db, "item", true);
     expect(mocks.update).toHaveBeenCalledWith("item-ref", {
       state: "inStock", quantity: 1, stockBaseline: 1, bought: true, boughtAt: "server-time",
-      receiptRecorded: false, updatedAt: "server-time"
+      receiptRecorded: false, receiptRestored: "delete-field", receiptId: "delete-field", receiptBoughtAt: "delete-field", updatedAt: "server-time"
     });
 
   });
@@ -46,7 +48,7 @@ describe("setItemBought", () => {
   it("moves an unchecked purchase back to the shopping list", async () => {
     await setItemBought(db, "item", false);
     expect(mocks.update).toHaveBeenCalledWith("item-ref", {
-      state: "toBuy", bought: false, boughtAt: null, receiptRecorded: false, updatedAt: "server-time"
+      state: "toBuy", bought: false, boughtAt: null, receiptRecorded: false, receiptRestored: "delete-field", receiptId: "delete-field", receiptBoughtAt: "delete-field", updatedAt: "server-time"
     });
   });
 
@@ -55,7 +57,7 @@ describe("setItemBought", () => {
     await setItemBought(db, "item", true);
     expect(mocks.update).toHaveBeenCalledWith("item-ref", {
       state: "inStock", stockBaseline: 0.5, bought: true, boughtAt: "server-time",
-      receiptRecorded: false, updatedAt: "server-time"
+      receiptRecorded: false, receiptRestored: "delete-field", receiptId: "delete-field", receiptBoughtAt: "delete-field", updatedAt: "server-time"
     });
   });
 

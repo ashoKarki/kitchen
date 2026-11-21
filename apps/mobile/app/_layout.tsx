@@ -23,6 +23,9 @@ import { PushStatusContext } from "../src/pushStatus";
 import { ToastProvider } from "../src/toast";
 import { registerForPushNotifications } from "../src/push";
 import GoogleSignInScreen from "../src/GoogleSignInScreen";
+import VoiceShopping from "../src/VoiceShopping";
+import ExpiryReminderManager from "../src/ExpiryReminderManager";
+import { clearExpiryNotifications } from "../src/expiryNotifications";
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -43,6 +46,14 @@ export default function RootLayout() {
   const [authError, setAuthError] = useState<string | null>(null);
   const [membershipStatus, setMembershipStatus] = useState<"checking" | "member" | "private" | "signedOut">("checking");
   const router = useRouter();
+
+  useEffect(() => {
+    if (authLoading || authUser) return;
+    void clearExpiryNotifications().catch((error: unknown) => {
+      console.error("Could not clear expiry reminders after sign-out", error);
+      setPushStatus(`Could not clear expiry reminders: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  }, [authLoading, authUser]);
 
   useEffect(() => {
     try {
@@ -162,6 +173,8 @@ export default function RootLayout() {
         router.replace("/(tabs)/shopping");
       } else if (response.notification.request.content.data?.screen === "expenses") {
         router.replace("/(tabs)/expenses");
+      } else if (response.notification.request.content.data?.screen === "pantry") {
+        router.replace("/(tabs)");
       }
     });
     return () => {
@@ -175,11 +188,12 @@ export default function RootLayout() {
       <PushStatusContext.Provider value={pushStatus}>
         <ToastProvider>
           {!authLoading && !(authUser && membershipStatus === "checking")
-            && authUser && membershipStatus === "member"
-            ? <Stack screenOptions={{ headerShown: false }}>
+            && authUser && membershipStatus === "member" && activeKitchenId
+            ? <><Stack screenOptions={{ headerShown: false }}>
               <Stack.Screen name="(tabs)" />
               <Stack.Screen name="notifications" options={{ headerShown: true, title: "Notifications", headerTintColor: "#26392e", headerStyle: { backgroundColor: "#ffffff" } }} />
-            </Stack>
+            </Stack><VoiceShopping key={`${authUser.uid}:${activeKitchenId}`} userId={authUser.uid} kitchenId={activeKitchenId} />
+              <ExpiryReminderManager key={`${authUser.uid}:${activeKitchenId}`} userId={authUser.uid} kitchenId={activeKitchenId} /></>
             : <GoogleSignInScreen
               authLoading={authLoading}
               authBusy={authBusy}

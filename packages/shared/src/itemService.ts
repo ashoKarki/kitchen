@@ -56,6 +56,9 @@ export async function setItemBought(
       bought,
       boughtAt: bought ? serverTimestamp() : null,
       receiptRecorded: false,
+      receiptRestored: deleteField(),
+      receiptId: deleteField(),
+      receiptBoughtAt: deleteField(),
       state: bought ? "inStock" : "toBuy",
       ...(bought && quantity === 0 ? { quantity: 1 } : {}),
       ...(bought ? { stockBaseline: quantity === 0 ? 1 : quantity } : {}),
@@ -92,18 +95,6 @@ export async function adjustItemQuantity(db: Firestore, itemId: string, delta: n
   });
 }
 
-export async function markItemsReceiptRecorded(db: Firestore, itemIds: readonly string[]): Promise<void> {
-  if (itemIds.length === 0) return;
-  const batch = writeBatch(db);
-  for (const itemId of itemIds) {
-    batch.update(doc(itemCollection(db), itemId), {
-      receiptRecorded: true,
-      updatedAt: serverTimestamp()
-    });
-  }
-  await batch.commit();
-}
-
 export async function completeShoppingList(
   db: Firestore,
   itemIds: readonly string[],
@@ -116,7 +107,7 @@ export async function completeShoppingList(
         state: "inStock",
         bought: true,
         ...(itemId === newlyBoughtItemId
-          ? { boughtAt: serverTimestamp(), receiptRecorded: false }
+          ? { boughtAt: serverTimestamp(), receiptRecorded: false, receiptRestored: deleteField(), receiptId: deleteField(), receiptBoughtAt: deleteField() }
           : {}),
         updatedAt: serverTimestamp()
       });

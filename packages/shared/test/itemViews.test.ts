@@ -118,6 +118,13 @@ describe("isUnreceiptedPurchase", () => {
     expect(isUnreceiptedPurchase({ bought: true, boughtAt: null, receiptRecorded: false })).toBe(true);
   });
 
+  it("keeps restored purchases available after the normal 24-hour window", () => {
+    const restored = { ...item("inStock"), bought: true, boughtAt: Timestamp.fromMillis(0), receiptRestored: true };
+    expect(isUnreceiptedPurchase(restored, 172_800_000)).toBe(true);
+    expect(itemsForView([{ id: "restored", item: restored }], "shopping", new Date(172_800_000))).toHaveLength(1);
+    expect(isUnreceiptedPurchase({ ...restored, receiptRecorded: true }, 172_800_000)).toBe(false);
+  });
+
   it("requires a checked, unrecorded purchase within 24 hours when timestamped", () => {
     const now = Date.now();
     expect(isUnreceiptedPurchase({

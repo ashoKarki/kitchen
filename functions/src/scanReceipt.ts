@@ -24,7 +24,7 @@ const inputSchema = z.object({
   mimeType: z.enum(["image/jpeg", "image/png"])
 });
 
-const systemPrompt = `You extract items from German-language retail receipts only, including Austrian German receipts such as BILLA. The printed text will be German; interpret German labels and Austrian retail conventions, and do not assume English labels. Return JSON only, with no markdown or prose, matching the requested schema. All amounts are signed integer euro cents, never decimal euros. German receipt numbers use a decimal comma (for example 1,29), a dot for thousands, and may use EUR or €. Convert dates from DD.MM.YYYY or DD.MM.YY to YYYY-MM-DD; if no valid date is visible, use a validation error rather than inventing one. The total may be labelled SUMME, GESAMT, or "Summe EUR". Prefer the retailer name (for example BILLA) for storeName, not its address or branch number. Read product descriptions and their corresponding amount column; ignore tax-letter columns such as C or D. On BILLA receipts, "Gegeben", "Kundenbeleg", card/payment details, and authorization numbers are not purchased items; use the first purchase date/time and ignore repeated payment slip details. Treat a line labelled PFANDARTIKEL or similar as a separate Deposit/Pfand item. Preserve printed product names in German in rawName; normalize name only enough to remove tax codes and unrelated receipt marks. Preserve discounts and Pfand returns as negative amounts. Classify each line into exactly one of: Groceries, Beverages, Cafe & Eating out, Snacks & Sweets, Alcohol, Tobacco, Household, Drugstore & Personal care, Deposit/Pfand, Other. Use null category only when genuinely uncertain. necessity must be essential, discretionary, or neutral. A Pfand deposit charged is a positive amount; Pfand return/credit is negative. Do not invent missing values. Use quantity 1 when no count is shown.`;
+const systemPrompt = `You extract items from German-language retail receipts only, including Austrian German receipts such as BILLA. The printed text will be German; interpret German labels and Austrian retail conventions, and do not assume English labels. Return JSON only, with no markdown or prose, matching the requested schema. All amounts are signed integer euro cents, never decimal euros. German receipt numbers use a decimal comma (for example 1,29), a dot for thousands, and may use EUR or €. Convert dates from DD.MM.YYYY or DD.MM.YY to YYYY-MM-DD; if no valid date is visible, use a validation error rather than inventing one. The total may be labelled SUMME, GESAMT, or "Summe EUR". Prefer the retailer name (for example BILLA) for storeName, not its address or branch number. Read product descriptions and their corresponding amount column; ignore tax-letter columns such as C or D. On BILLA receipts, "Gegeben", "Kundenbeleg", card/payment details, and authorization numbers are not purchased items; use the first purchase date/time and ignore repeated payment slip details. Treat a line labelled PFANDARTIKEL or similar as a separate Deposit/Pfand item. Preserve the printed German product description in rawName. Translate name to a concise English product name, retaining relevant brand and distinguishing details; for example Vollmilch becomes Whole milk and Äpfel becomes Apples. Do not guess unclear abbreviations or invent product details: retain unclear text and include a warning for review. Preserve discounts and Pfand returns as negative amounts. Classify each line into exactly one of: Groceries, Beverages, Cafe & Eating out, Snacks & Sweets, Alcohol, Tobacco, Household, Drugstore & Personal care, Deposit/Pfand, Other. Use null category only when genuinely uncertain. necessity must be essential, discretionary, or neutral. A Pfand deposit charged is a positive amount; Pfand return/credit is negative. Do not invent missing values. Use quantity 1 when no count is shown.`;
 
 function categoriesFromSettings(value: unknown): ExpenseCategory[] {
   if (typeof value !== "object" || value === null || !("discretionaryCategories" in value)) {
@@ -79,7 +79,7 @@ function providerErrorMessage(error: APIError): string {
   return error.message;
 }
 
-async function requestParsedReceipt(
+export async function requestParsedReceipt(
   client: Anthropic,
   model: string,
   imageBase64: string,
@@ -90,7 +90,7 @@ async function requestParsedReceipt(
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const response = await client.messages.create({
       model,
-      max_tokens: 4096,
+      max_tokens: attempt === 0 ? 8192 : 16384,
       system: systemPrompt,
       messages: [{
         role: "user",
@@ -101,20 +101,28 @@ async function requestParsedReceipt(
           },
           {
             type: "text",
-            text: `Extract this receipt. Return a JSON object with storeName, purchaseDateKey, optional purchaseTime, totalCents, optional paymentMethod, lineItems (rawName, name, quantity, amountCents, category, necessity, optional isDeposit), confidence, and warnings. Default necessity: Groceries, Household, and Drugstore & Personal care are essential; categories in this kitchen's discretionary list are discretionary; all other categories are neutral. The configured discretionary categories are: ${discretionaryCategories.join(", ")}.${correction ? ` Correct the previous response using this validation feedback: ${correction}` : ""}`
+            text: `Extract this receipt. Return a JSON object with storeName, purchaseDateKey, optional purchaseTime, totalCents, optional paymentMethod, lineItems (rawName, name, quantity, amountCents, category, necessity, optional isDeposit), confidence, and warnings. paymentMethod must be exactly "cash", "card", or "other": map credit and debit cards, including Visa, Mastercard, American Express, Maestro, girocard and Bankomat, to "card", and Bargeld to "cash". Use "other" for non-card payments and mixed payment methods. Omit paymentMethod if unknown; do not include card details. Default necessity: Groceries, Household, and Drugstore & Personal care are essential; categories in this kitchen's discretionary list are discretionary; all other categories are neutral. The configured discretionary categories are: ${discretionaryCategories.join(", ")}.${correction ? ` Correct the previous response using this validation feedback: ${correction}` : ""}`
           }
         ]
       }]
     });
 
     try {
+      if (response.stop_reason === "max_tokens") {
+        throw new Error("The scanner response was cut off before it finished.");
+      }
       return parsedReceiptSchema.parse(parseJson(extractText(response.content)));
     } catch (error) {
       correction = error instanceof z.ZodError
         ? error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")
+        : error instanceof SyntaxError ? "The scanner returned incomplete or invalid JSON."
         : error instanceof Error ? error.message : String(error);
       if (attempt === 1) {
-        throw new HttpsError("invalid-argument", `Receipt could not be validated after retry: ${correction}`);
+        console.error("Receipt response validation failed", {
+          errorType: error instanceof z.ZodError ? "schema" : error instanceof SyntaxError ? "json" : "response",
+          stopReason: response.stop_reason
+        });
+        throw new HttpsError("invalid-argument", `Receipt could not be validated after retry: ${correction} Please try a clearer image or enter the receipt manually.`);
       }
     }
   }
@@ -125,7 +133,7 @@ export const scanReceipt = onCall(
   {
     invoker: "public",
     maxInstances: 2,
-    timeoutSeconds: 60,
+    timeoutSeconds: 150,
     enforceAppCheck: enforceAppCheck.value(),
     secrets: [anthropicApiKey]
   },
@@ -144,7 +152,7 @@ export const scanReceipt = onCall(
     if (!apiKey) throw new HttpsError("failed-precondition", "Receipt scanning is not configured on the server.");
 
     try {
-      const client = new Anthropic({ apiKey, timeout: 50_000, maxRetries: 1 });
+      const client = new Anthropic({ apiKey, timeout: 65_000, maxRetries: 0 });
       const settings = await getFirestore().doc(`kitchen/${member.householdId}`).get();
       const discretionaryCategories = categoriesFromSettings(settings.data());
       const parsed = await requestParsedReceipt(

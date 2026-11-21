@@ -15,11 +15,15 @@ import {
   adjustItemQuantity,
   deleteItem,
   expenseCategories,
+  expiryDaysRemaining,
+  expiryDescription,
+  expiryWarningDays,
   filterItemsByName,
   formatQuantity,
   itemsForView,
   recentlyDeletedItems,
   itemUndoMilliseconds,
+  isValidExpiryDate,
   parseQuantity,
   ensureSettings,
   setItemBought,
@@ -42,6 +46,7 @@ import BudgetsPage from "./BudgetsPage";
 import InsightsPage from "./InsightsPage";
 import NotificationsPage from "./NotificationsPage";
 import { useBudgetAlerts } from "./useBudgetData";
+import { useExpiryWarnings } from "./useExpiryWarnings";
 import ReceiptsPage from "./ReceiptsPage";
 import { useToast } from "./toast";
 import { useKitchenId } from "./useKitchenPath";
@@ -63,10 +68,12 @@ function PageMessage({ children }: { children: string }) {
 
 function NotificationsLink() {
   const { data, error } = useBudgetAlerts();
+  const expiry = useExpiryWarnings();
   const unread = data?.filter(({ alert }) => !alert.read).length ?? 0;
-  return <Link to="/notifications" className="notifications-link" aria-label={error ? "Notifications, unable to load" : `Notifications${unread ? `, ${unread} unread` : ""}`} title={error ? `Could not load notifications: ${error}` : "Notifications"}>
+  const count = unread + expiry.warnings.length;
+  return <Link to="/notifications" className="notifications-link" aria-label={error || expiry.error ? "Notifications, unable to load" : `Notifications${unread ? `, ${unread} unread` : ""}${expiry.warnings.length ? `, ${expiry.warnings.length} expiry warnings` : ""}`} title={error || expiry.error ? `Could not load notifications: ${error ?? expiry.error}` : "Notifications"}>
     <svg aria-hidden="true" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" /></svg>
-    {unread > 0 && <span className="notifications-badge">{unread > 99 ? "99+" : unread}</span>}
+    {count > 0 && <span className="notifications-badge">{count > 99 ? "99+" : count}</span>}
   </Link>;
 }
 
@@ -131,7 +138,8 @@ function ItemEditor({
   const { showToast } = useToast();
   const [name, setName] = useState(initial?.item.name ?? "");
   const [quantity, setQuantity] = useState(formatQuantity(initial?.item.quantity ?? 1));
-  const [category, setCategory] = useState<ExpenseCategory>(initial?.item.category ?? "Other");
+  const [category, setCategory] = useState<ExpenseCategory>(initial?.item.category ?? "Groceries");
+  const [expiryDate, setExpiryDate] = useState(initial?.item.expiryDate ?? "");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const allowsZero = initial ? initial.item.state !== "toBuy" : defaultState !== "toBuy";
@@ -151,10 +159,14 @@ function ItemEditor({
       showToast(message, "error");
       return;
     }
+    if (expiryDate && !isValidExpiryDate(expiryDate)) {
+      setError("Enter a valid expiry date in YYYY-MM-DD format.");
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
-      await onSave({ name: name.trim(), quantity: parsedQuantity, category, state: defaultState === "inStock" && parsedQuantity === 0 ? "finished" : defaultState });
+      await onSave({ name: name.trim(), quantity: parsedQuantity, category, expiryDate: expiryDate || null, state: defaultState === "inStock" && parsedQuantity === 0 ? "finished" : defaultState });
       onCancel();
     } catch (saveError) {
       const message = saveError instanceof Error ? saveError.message : String(saveError);
@@ -183,6 +195,10 @@ function ItemEditor({
           </select>
         </label>
       </div>
+      <label>
+        Expiry date (optional)
+        <input aria-label="Expiry date" type="date" min="1900-01-01" max="9999-12-31" value={expiryDate} onChange={(event) => setExpiryDate(event.target.value)} />
+      </label>
       {error && <p className="error" role="alert">{error}</p>}
       <div className="actions">
         <button className="button secondary" type="button" onClick={onCancel}>Cancel</button>
@@ -294,6 +310,8 @@ function InventoryItemCard({
       <button className="item-main" onClick={onEdit}>
         <span className={`item-name${shopping && item.bought ? " bought-item" : ""}`}>{item.name}</span>
         <span className={`muted${shopping && item.bought ? " bought-item" : ""}`}>Qty {formatQuantity(item.quantity)} · {item.category}{warning ? ` · ${warning === "critical" ? "Critical stock" : "Low stock"}` : ""}</span>
+        {item.expiryDate && <span className="muted">{item.state === "inStock" && expiryDaysRemaining(item.expiryDate) <= expiryWarningDays
+          ? expiryDescription(item.expiryDate) : `Expires ${item.expiryDate}`}</span>}
       </button>
       {item.state === "finished" && <span className="pill finished">Finished</span>}
       <div className="item-actions">
@@ -346,6 +364,7 @@ function InventoryPage({ shopping }: { shopping: boolean }) {
           ...(item.quantity !== editing.item.quantity ? { state: item.quantity === 0 ? "finished" : "inStock" } : {})
         } : {}),
         category: item.category,
+        expiryDate: item.expiryDate ?? null,
         bought: false,
         boughtAt: null,
         receiptRecorded: false

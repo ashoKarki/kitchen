@@ -69,22 +69,25 @@ export interface PeriodBounds {
 export interface KitchenItem {
   name: string;
   quantity: number;
+  expiryDate?: string | null | undefined;
   stockBaseline?: number | undefined;
   category: ExpenseCategory;
   state: ItemState;
   bought?: boolean;
   boughtAt?: Timestamp | null;
   receiptRecorded?: boolean;
+  receiptRestored?: boolean | undefined;
   deletedAt?: Timestamp | undefined;
   createdAt: Timestamp;
   updatedAt: Timestamp;
 }
 
-export type NewKitchenItem = Pick<KitchenItem, "name" | "quantity" | "category" | "state">;
+export type NewKitchenItem = Pick<KitchenItem, "name" | "quantity" | "category" | "state" | "expiryDate">;
 
 export interface KitchenItemUpdate {
   name?: string;
   quantity?: number;
+  expiryDate?: string | null;
   stockBaseline?: number;
   category?: ExpenseCategory;
   state?: ItemState;

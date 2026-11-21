@@ -24,10 +24,11 @@ export function filterItemsByName(items: readonly ItemWithId[], search: string):
 }
 
 export function isUnreceiptedPurchase(
-  item: Pick<KitchenItem, "bought" | "boughtAt" | "receiptRecorded">,
+  item: Pick<KitchenItem, "bought" | "boughtAt" | "receiptRecorded" | "receiptRestored">,
   now = Date.now()
 ): boolean {
   if (item.bought !== true || item.receiptRecorded) return false;
+  if (item.receiptRestored) return true;
   if (!item.boughtAt) return true;
   const elapsed = now - item.boughtAt.toMillis();
   return elapsed >= 0 && elapsed < purchaseHoldMilliseconds;
@@ -55,7 +56,9 @@ export function itemsForView(items: readonly ItemWithId[], view: ItemView, now =
     if (item.deletedAt) return false;
     if (view === "pantry") return item.state !== "toBuy";
     if (item.state !== "inStock") return true;
-    if (!item.bought || !item.boughtAt || item.receiptRecorded) return false;
+    if (!item.bought || item.receiptRecorded) return false;
+    if (item.receiptRestored) return true;
+    if (!item.boughtAt) return false;
     const elapsed = now.getTime() - item.boughtAt.toMillis();
     return elapsed >= 0 && elapsed < purchaseHoldMilliseconds;
   });

@@ -20,12 +20,26 @@ const lineSchema = z.object({
   isDeposit: z.boolean().optional()
 });
 
+const paymentMethodSchema = z.preprocess((value) => {
+  if (value === null) return undefined;
+  if (typeof value !== "string") return value;
+  const text = value.trim().toLowerCase();
+  if (text === "other") return "other";
+  const isCash = /\b(?:cash|bar|bargeld)\b/.test(text.replace(/\belectronic[\s-]+cash\b/g, ""));
+  const isCard = /\b(?:cards?|master[\s-]*card|visa|maestro|amex|american[\s-]+express|discover|diners(?:[\s-]+club)?|jcb|union[\s-]*pay|rupay|eftpos|interac|v[\s-]+pay|girocard|eurocard|bankomat(?:karte)?|debit(?:karte)?|credit|kreditkarte|karte|ec[\s-]*(?:karte|card)|electronic[\s-]+cash|bancontact|dankort|hipercard|mada)\b/.test(text);
+  const isOtherPayment = /\b(?:gift[\s-]*cards?|geschenkkarte|voucher|gutschein|paypal|bank[\s-]+transfer|überweisung)\b/.test(text);
+  if (isOtherPayment) return value;
+  if (isCash && !isCard) return "cash";
+  if (isCard && !isCash) return "card";
+  return value;
+}, z.enum(["cash", "card", "other"]).optional());
+
 export const parsedReceiptSchema = z.object({
   storeName: z.string().min(1).max(100),
   purchaseDateKey: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   purchaseTime: z.string().regex(/^\d{2}:\d{2}$/).optional(),
   totalCents: z.number().int().safe(),
-  paymentMethod: z.enum(["cash", "card", "other"]).optional(),
+  paymentMethod: paymentMethodSchema,
   lineItems: z.array(lineSchema).max(200),
   confidence: z.number().min(0).max(1),
   warnings: z.array(z.string().max(500)).max(30)

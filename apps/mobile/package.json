@@ -6,6 +6,8 @@
   "scripts": {
     "prestart": "npm run build --workspace=@my-kitchen/shared",
     "start": "expo start",
+    "preios": "node ./voice/sync-ios.mjs && npm run build --workspace=@my-kitchen/shared",
+    "ios": "expo run:ios",
     "pretype-check": "npm run build --workspace=@my-kitchen/shared",
     "type-check": "tsc --noEmit"
   },
